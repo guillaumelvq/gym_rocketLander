@@ -151,6 +151,9 @@ class RocketLander(gym.Env):
         self.landed = False
         self.landed_fraction = []
         self.good_landings = 0
+        self.total_landed_ticks = 0
+        self.landed_ticks = 0
+        self.done = False
         self.speed_threshold = speed_threshold
         almost_inf = 9999
         high = np.array(
@@ -197,12 +200,13 @@ class RocketLander(gym.Env):
         self.world.contactListener = self.world.contactListener_keepref
         self.game_over = False
         self.prev_shaping = None
+        self.episode_number += 1
         self.throttle = 0
         self.gimbal = 0.0
+        self.total_landed_ticks += self.landed_ticks
         self.landed_ticks = 0
         self.stepnumber = 0
         self.smoke = []
-        self.episode_number += 1
 
         # self.terrainheigth = self.np_random.uniform(H / 20, H / 10)
         self.terrainheigth = H / 20
@@ -498,6 +502,7 @@ class RocketLander(gym.Env):
             and speed < self.speed_threshold
         )
         done = False
+        self.done = False
 
         reward = -fuelcost
 
@@ -506,6 +511,7 @@ class RocketLander(gym.Env):
 
         if self.game_over:
             done = True
+            self.done = True
         else:
             # reward shaping
             shaping = (
@@ -519,23 +525,19 @@ class RocketLander(gym.Env):
             self.prev_shaping = shaping
             if self.legs[0].ground_contact:
                 reward += 100
-            if self.legs[0].ground_contact:
+            if self.legs[1].ground_contact:
                 reward += 100
             if self.landed:
-                # print("short landing")
                 self.landed_ticks += 1
                 reward += 1
-                self.good_landings += 1
 
             else:
                 self.landed_ticks = 0
-            if self.landed_ticks > 59:
-                print("GOOD LANDING")
-                self.good_landings += 1
             if self.landed_ticks == FPS:
                 reward = 1
-
+                self.good_landings += 1
                 done = True
+                self.done = True
 
         if x_distance < 0.90 * (SHIP_WIDTH / 2):
             reward += 0.01
