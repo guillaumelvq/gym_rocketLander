@@ -8,13 +8,16 @@ Runs only on localhost: it executes the reward code typed in the page.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,9 +30,11 @@ from pydantic import BaseModel, Field
 import gym.envs.box2d.rocket_lander as RL
 from rocketlander.autopilot import Autopilot
 from rocketlander.challenges import CHALLENGES, CodeReward, compile_reward
+from rocketlander.controls import KeyboardPilot
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "runs"
+PLAYERS = ROOT / "players"  # human attempts (attempts.jsonl)
 STATIC = Path(__file__).parent / "static"
 FPS = RL.FPS
 
@@ -233,6 +238,130 @@ def _probe_info(level: int, config: dict) -> dict:
     return dict(env.info, memory={}, base_reward=0.0)
 
 
+# --------------------------------------------------------------------------- human attempts
+
+_attempts_lock = threading.Lock()
+
+
+def _effective_config(level: int, config: dict) -> dict:
+    """Full scenario of a human attempt (humans always use direct control)."""
+    cfg = {**RL.level_config(level), **{k: v for k, v in (config or {}).items() if k in RL.DEFAULT_CONFIG}}
+    cfg["control"] = "direct"
+    return cfg
+
+
+def scenario_signature(level: int, config: dict) -> str:
+    """Identifies a scenario for the leaderboard: same signature = same rules and start."""
+    cfg = _effective_config(level, config)
+    blob = json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in sorted(cfg.items())},
+                      sort_keys=True)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+def _rle_encode(actions: list[list[float]]) -> list[list]:
+    out: list[list] = []
+    for a in actions:
+        a = [float(x) for x in a]
+        if out and out[-1][1] == a:
+            out[-1][0] += 1
+        else:
+            out.append([1, a])
+    return out
+
+
+def _rle_decode(rle: list[list]) -> list[list[float]]:
+    return [list(a) for n, a in rle for _ in range(int(n))]
+
+
+def _attempts_file() -> Path:
+    return PLAYERS / "attempts.jsonl"
+
+
+def load_attempts() -> list[dict]:
+    path = _attempts_file()
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+def save_attempt(attempt: dict) -> None:
+    with _attempts_lock:
+        PLAYERS.mkdir(parents=True, exist_ok=True)
+        with open(_attempts_file(), "a", encoding="utf8") as fh:
+            fh.write(json.dumps(attempt) + "\n")
+
+
+def _rank_key(a: dict):
+    return (a["outcome"] != "success", -a["score"], a["duration"])
+
+
+def _summary(a: dict) -> dict:
+    return {k: v for k, v in a.items() if k not in ("actions", "trajectory")}
+
+
+@app.get("/api/attempts")
+def list_attempts(level: Optional[int] = None, config: Optional[str] = None, signature: Optional[str] = None,
+                  limit: int = 50) -> dict:
+    sig = signature
+    if sig is None and level is not None:
+        sig = scenario_signature(level, json.loads(config) if config else {})
+    items = [a for a in load_attempts() if sig is None or a["signature"] == sig]
+    items.sort(key=_rank_key)
+    ranked = [dict(_summary(a), rank=i + 1) for i, a in enumerate(items[:limit])]
+    return {"signature": sig, "count": len(items), "attempts": ranked}
+
+
+@app.get("/api/attempts/{attempt_id}")
+def get_attempt(attempt_id: str) -> dict:
+    for a in load_attempts():
+        if a["id"] == attempt_id:
+            return a
+    raise HTTPException(404, "tentative inconnue")
+
+
+@app.delete("/api/attempts/{attempt_id}")
+def delete_attempt(attempt_id: str) -> dict:
+    with _attempts_lock:
+        items = load_attempts()
+        kept = [a for a in items if a["id"] != attempt_id]
+        if len(kept) == len(items):
+            raise HTTPException(404, "tentative inconnue")
+        PLAYERS.mkdir(parents=True, exist_ok=True)
+        _attempts_file().write_text("".join(json.dumps(a) + "\n" for a in kept), encoding="utf8")
+    return {"deleted": attempt_id}
+
+
+def _rank_of(attempt: dict) -> tuple[int, int]:
+    same = [a for a in load_attempts() if a["signature"] == attempt["signature"]]
+    same.sort(key=_rank_key)
+    ids = [a["id"] for a in same]
+    return (ids.index(attempt["id"]) + 1 if attempt["id"] in ids else len(ids)), len(ids)
+
+
+def autopilot_trajectory(level: int, config: dict, seed: int, reward_params: Optional[dict] = None,
+                         every: int = 3) -> dict:
+    """Runs the autopilot headless on a scenario: the reference curve shown next to a human."""
+    env = RL.RocketLander(level_number=level, config=_effective_config(level, config), reward_params=reward_params)
+    env.seed(seed)
+    obs = env.reset()
+    pilot = Autopilot(env, target_touchdown_speed=1.0, margin=3.0)
+    traj, ret, done = [], 0.0, False
+    while not done:
+        obs, r, done, info = env.step(pilot.predict(obs)[0])
+        ret += r
+        if env.stepnumber % every == 0 or done:
+            traj.append([env.stepnumber, round(info["altitude"], 2), round(info["velocity_y"] * RL.START_SPEED, 2)])
+    out = {"outcome": _outcome(env.info), "score": round(ret, 3), "trajectory": traj}
+    env.close()
+    return out
+
+
 # --------------------------------------------------------------------------- live simulation
 
 
@@ -247,11 +376,32 @@ class Agent:
 
 
 class HumanAgent(Agent):
-    def __init__(self):
-        self.action = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    """Keyboard pilot. The page sends the held keys; actions are computed here, frame by
+    frame, so that the attempt can be recorded and replayed exactly."""
+
+    def __init__(self, mode: str = "simple"):
+        self.pilot = KeyboardPilot(mode)
+        self.raw_action: Optional[list[float]] = None  # legacy {type: action} messages
 
     def act(self, env, obs):
-        return self.action
+        if self.raw_action is not None:
+            return list(self.raw_action)
+        return self.pilot.action(env)
+
+
+class ReplayAgent(Agent):
+    """Plays back the per-frame actions of a recorded human attempt."""
+
+    def __init__(self, attempt: dict):
+        self.attempt = attempt
+        self.actions = _rle_decode(attempt["actions"])
+        self._start: Optional[int] = None
+
+    def act(self, env, obs):
+        if self._start is None:
+            self._start = env.stepnumber
+        i = env.stepnumber - self._start
+        return self.actions[i] if i < len(self.actions) else [0.0, -1.0, 0.0]
 
 
 class RandomAgent(Agent):
@@ -363,8 +513,10 @@ def _outcome(info: dict) -> str:
 @app.websocket("/ws/sim")
 async def simulate(ws: WebSocket) -> None:
     """One live episode per 'start' message. Client -> server messages:
-    {type: start, agent: human|autopilot|random|model, run, which, level, config, seed, speed}
-    {type: action, action: [gimbal, throttle, side]}   (human agent)
+    {type: start, agent: human|autopilot|random|model|replay, run, which, attempt, level, config,
+     seed, speed, controls (simple|expert), player, countdown}
+    {type: keys, keys: [up, down, left, right, side_left, side_right]}   (human agent)
+    {type: go}   (starts a human episode after the countdown)
     {type: speed, value}  {type: stop}
     """
     await ws.accept()
@@ -376,22 +528,29 @@ async def simulate(ws: WebSocket) -> None:
             seed = int(msg.get("seed", 0))
             level = int(msg.get("level", 1))
             config = {k: v for k, v in (msg.get("config") or {}).items() if k in RL.DEFAULT_CONFIG}
-            if agent_kind == "model":
+            reward_params = {k: float(v) for k, v in (msg.get("reward") or {}).items() if k in RL.REWARD}
+            if agent_kind == "replay":
+                attempt = get_attempt(str(msg.get("attempt")))
+                agent: Agent = ReplayAgent(attempt)
+                seed, level = int(attempt["seed"]), int(attempt["level"])
+                config = attempt["config"]
+                reward_params = attempt.get("reward_params") or {}
+            elif agent_kind == "model":
                 agent: Agent = ModelAgent(msg["run"], msg.get("which", "best"))
                 # a model is shown in the scenario it was trained on, unless the page overrides it
                 if not msg.get("override_scenario"):
                     level = int(agent.meta.get("level", level))
                     config = agent.meta.get("config", {}) or {}
             elif agent_kind == "human":
-                agent = HumanAgent()
+                agent = HumanAgent(msg.get("controls", "simple"))
+                config = _effective_config(level, config)
             elif agent_kind == "random":
                 agent = RandomAgent(np.random.default_rng(seed))
             else:
                 agent = None  # autopilot needs the env
             env = RL.RocketLander(level_number=level, continuous=getattr(agent, "continuous", True),
                                   reward_params=(agent.meta.get("reward") if agent_kind == "model"
-                                                 else {k: float(v) for k, v in (msg.get("reward") or {}).items()
-                                                       if k in RL.REWARD}),
+                                                 else reward_params),
                                   config=config)
             if agent is None:
                 agent = AutopilotAgent(env)
@@ -404,8 +563,17 @@ async def simulate(ws: WebSocket) -> None:
             ret, custom_ret = 0.0, (0.0 if custom else None)
             await ws.send_json({"type": "init", "world": _world(env), "config": env.config,
                                 "level": level, "agent": agent_kind, "seed": seed,
-                                "frame_skip": agent.frame_skip})
+                                "frame_skip": agent.frame_skip,
+                                "attempt": _summary(agent.attempt) if isinstance(agent, ReplayAgent) else None})
             await ws.send_json(_frame(env, ret, custom_ret))
+            if msg.get("countdown"):
+                # the page shows 3-2-1 over the first frame, then sends {type: go}
+                session["go"] = asyncio.Event()
+                await session["go"].wait()
+            is_human = isinstance(agent, HumanAgent)
+            applied: list[list[float]] = []
+            trajectory: list[list[float]] = []
+            touchdown_vy: Optional[float] = None
             action = agent.act(env, obs)
             done, t0, frames_done = False, time.perf_counter(), 0
             while not done:
@@ -414,8 +582,15 @@ async def simulate(ws: WebSocket) -> None:
                 for _ in range(n):
                     if env.stepnumber % agent.frame_skip == 0:
                         action = agent.act(env, obs)
+                    if is_human:
+                        applied.append([float(x) for x in action])
                     obs, r, done, info = env.step(action)
                     ret += r
+                    if touchdown_vy is None and (info["left_leg_contact"] or info["right_leg_contact"]):
+                        touchdown_vy = info["velocity_y"] * RL.START_SPEED
+                    if is_human and (env.stepnumber % 3 == 0 or done):
+                        trajectory.append([env.stepnumber, round(info["altitude"], 2),
+                                           round(info["velocity_y"] * RL.START_SPEED, 2)])
                     if custom:
                         try:
                             custom_ret += custom(dict(info, memory=memory), r)
@@ -430,10 +605,32 @@ async def simulate(ws: WebSocket) -> None:
                 target = t0 + frames_done / (FPS * max(speed, 0.05))
                 await asyncio.sleep(max(0.0, target - time.perf_counter()))
             info = env.info
-            await ws.send_json({"type": "end", "outcome": _outcome(info), "return": round(ret, 3),
-                                "custom_return": None if custom_ret is None else round(custom_ret, 3),
-                                "steps": env.stepnumber, "x_on_ship": round(info["x_on_ship"], 3),
-                                "fuel": round(info["fuel"], 3), "rotation": round(info["rotation"], 2)})
+            end = {"type": "end", "outcome": _outcome(info), "return": round(ret, 3),
+                   "custom_return": None if custom_ret is None else round(custom_ret, 3),
+                   "steps": env.stepnumber, "x_on_ship": round(info["x_on_ship"], 3),
+                   "fuel": round(info["fuel"], 3), "rotation": round(info["rotation"], 2),
+                   "touchdown_vy": None if touchdown_vy is None else round(touchdown_vy, 2),
+                   "touchdown_limit": env.config.get("max_touchdown_speed")}
+            if is_human:
+                attempt = {
+                    "id": uuid.uuid4().hex[:10],
+                    "name": (str(msg.get("player") or "Anonyme").strip() or "Anonyme")[:30],
+                    "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "signature": scenario_signature(level, config),
+                    "seed": seed, "level": level, "config": env.config, "reward_params": reward_params,
+                    "controls": agent.pilot.mode,
+                    "outcome": end["outcome"], "score": end["return"], "custom_score": end["custom_return"],
+                    "duration": round(env.stepnumber / FPS, 2), "fuel": end["fuel"],
+                    "x_on_ship": end["x_on_ship"], "touchdown_vy": end["touchdown_vy"],
+                    "touchdown_limit": end["touchdown_limit"],
+                    "actions": _rle_encode(applied), "trajectory": trajectory,
+                }
+                save_attempt(attempt)
+                rank, total = _rank_of(attempt)
+                reference = await asyncio.to_thread(autopilot_trajectory, level, config, seed, reward_params)
+                end["attempt"] = dict(_summary(attempt), rank=rank, total=total, trajectory=trajectory)
+                end["autopilot"] = reference
+            await ws.send_json(end)
             env.close()
         except asyncio.CancelledError:
             raise
@@ -451,8 +648,12 @@ async def simulate(ws: WebSocket) -> None:
                     session["task"].cancel()
                 session["speed"] = float(msg.get("speed", session["speed"]))
                 session["task"] = asyncio.create_task(run_episode(msg))
+            elif kind == "keys" and isinstance(session["agent"], HumanAgent):
+                session["agent"].pilot.set_keys(msg.get("keys") or [])
             elif kind == "action" and isinstance(session["agent"], HumanAgent):
-                session["agent"].action = np.clip(np.asarray(msg["action"], dtype=np.float32), -1, 1)
+                session["agent"].raw_action = [float(x) for x in np.clip(np.asarray(msg["action"], dtype=np.float64), -1, 1)]
+            elif kind == "go" and session.get("go") is not None:
+                session["go"].set()
             elif kind == "speed":
                 session["speed"] = float(msg["value"])
             elif kind == "stop" and session["task"]:
