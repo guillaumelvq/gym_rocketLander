@@ -136,7 +136,7 @@ class RocketLander(gym.Env):
 
     def __init__(self, level_number=0, continuous=True, speed_threshold=1):
         self.level_number = level_number
-        self._seed()
+        self.seed()
         self.viewer = None
         self.episode_number = 0
 
@@ -155,16 +155,10 @@ class RocketLander(gym.Env):
         self.landed_ticks = 0
         self.done = False
         self.speed_threshold = speed_threshold
-        almost_inf = 9999
-        high = np.array(
-            [1, 1, 1, 1, 1, 1, 1, almost_inf, almost_inf, almost_inf], dtype=np.float32
-        )
-        low = -high
-        if not VEL_STATE:
-            high = high[0:7]
-            low = low[0:7]
-
-        self.observation_space = spaces.Box(low, high, dtype=np.float32)
+        # Observations are standardized with MEAN/VAR, so they are not bounded to [-1, 1].
+        obs_dim = 10 if VEL_STATE else 7
+        high = np.full(obs_dim, np.inf, dtype=np.float32)
+        self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
         if self.continuous:
             self.action_space = spaces.Box(-1, +1, (3,), dtype=np.float32)
@@ -173,9 +167,11 @@ class RocketLander(gym.Env):
 
         self.reset()
 
-    def _seed(self, seed=None):
+    def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
+
+    _seed = seed  # backward compatibility
 
     def _destroy(self):
         if not self.water:
@@ -289,10 +285,10 @@ class RocketLander(gym.Env):
         def initial_rocket_pos(level):
 
             if level > 0:
-                initial_x = W / 2 + W * np.random.uniform(-0.3, 0.3)
+                initial_x = W / 2 + W * self.np_random.uniform(-0.3, 0.3)
                 initial_y = H * 0.95
             else:
-                initial_x = W / 2 + W * np.random.uniform(-0.03, 0.03)
+                initial_x = W / 2 + W * self.np_random.uniform(-0.03, 0.03)
                 initial_y = H * 0.95
             return initial_x, initial_y
 
@@ -391,9 +387,9 @@ class RocketLander(gym.Env):
             -START_SPEED,
         )
 
-        self.lander.angularVelocity = (1 + random_velocity_factor) * np.random.uniform(
-            -1, 1
-        )
+        self.lander.angularVelocity = (
+            1 + random_velocity_factor
+        ) * self.np_random.uniform(-1, 1)
 
         self.drawlist = (
             self.legs + [self.water] + [self.ship] + self.containers + [self.lander]
@@ -409,7 +405,7 @@ class RocketLander(gym.Env):
         self.force_dir = 0
 
         if self.continuous:
-            np.clip(action, -1, 1)
+            action = np.clip(np.asarray(action, dtype=np.float64), -1, 1)
             self.gimbal += action[0] * 0.15 / FPS
             self.throttle += action[1] * 0.5 / FPS
             if action[2] > 0.5:
@@ -487,7 +483,7 @@ class RocketLander(gym.Env):
         )  # weight x position more
         speed = np.linalg.norm(vel_l)
         groundcontact = self.legs[0].ground_contact or self.legs[1].ground_contact
-        y_abs_speed = vel_l[1] * np.sin(angle)
+        y_abs_speed = vel_l[1] * np.sin(self.lander.angle)
         brokenleg = False
         brokenleg = (
             self.legs[0].joint.angle < 0 or self.legs[1].joint.angle > -0
@@ -523,24 +519,23 @@ class RocketLander(gym.Env):
             if self.prev_shaping is not None:
                 reward += shaping - self.prev_shaping
             self.prev_shaping = shaping
-            if self.legs[0].ground_contact:
-                reward += 100
-            if self.legs[1].ground_contact:
-                reward += 100
+            # Leg contact is already rewarded through the shaping term above (once, on
+            # touchdown). A per-step contact bonus would let the agent farm reward by
+            # resting on the ship instead of finishing the landing.
             if self.landed:
                 self.landed_ticks += 1
-                reward += 1
-
             else:
                 self.landed_ticks = 0
             if self.landed_ticks == FPS:
-                reward = 1
+                reward = 1.0
                 self.good_landings += 1
                 done = True
                 self.done = True
 
-        if x_distance < 0.90 * (SHIP_WIDTH / 2):
-            reward += 0.01
+        # Small bonus for flying above the ship. Kept below the per-step time penalty
+        # (0.25 / FPS) so hovering forever never beats landing.
+        if not self.game_over and abs(pos.x - W / 2) < 0.90 * (SHIP_WIDTH / 2):
+            reward += 0.1 / FPS
         if done:
             reward += max(-1, 0 - 2 * (speed + distance + abs(angle) + abs(vel_a)))
         elif not groundcontact:
@@ -553,7 +548,7 @@ class RocketLander(gym.Env):
         self.stepnumber += 1
 
         state = (state - MEAN[: len(state)]) / VAR[: len(state)]
-        return np.array(state), reward, done, {}
+        return np.array(state, dtype=np.float32), float(reward), done, {}
 
     def render(self, mode="human", close=False):
         if close:
@@ -656,7 +651,7 @@ class RocketLander(gym.Env):
             ]  # position
             self.smoke.append(s)
 
-        for s in self.smoke:
+        for s in list(self.smoke):
             s[1] += 1
             if s[1] > s[0]:
                 self.smoke.remove(s)
@@ -707,6 +702,11 @@ class RocketLander(gym.Env):
         self.smokescale.set_scale(newx=self.force_dir, newy=1)
 
         return self.viewer.render(return_rgb_array=mode == "rgb_array")
+
+    def close(self):
+        if self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None
 
 
 def rgb(r, g, b):
