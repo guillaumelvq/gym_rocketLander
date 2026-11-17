@@ -69,9 +69,12 @@ REWARD = {
     "success": 10.0,  # landed and stayed 1 s on the ship
     "center": 5.0,    # extra, full when landing on the ship's center
     "crash": 5.0,     # hull touched, broken leg, left the screen
-    "descent": 0.2,   # per frame, per 40 m/s of falling speed above the safe profile
+    "descent": 5.0,   # shaping weight of the falling speed above a safe profile
                       # v_safe(altitude) = 2 + sqrt(2 * 3 * altitude) m/s (~5 m/s at 2 m,
-                      # ~10 m/s at 10 m, ~26 m/s at 100 m): "slow down when getting low"
+                      # ~10 m/s at 10 m, ~26 m/s at 100 m): "slow down when getting low".
+                      # Part of the potential: getting too fast costs right away, braking
+                      # back to safe speed pays it back, so ending the episode early never
+                      # helps (a per-step penalty would make the agent flee off-screen).
     "crash_speed": 10.0,  # extra crash penalty per unit of speed (x40 m/s) at impact:
                           # crashing slower is less bad, which teaches braking
     "timeout": 5.0,   # still flying after MAX_STEPS
@@ -582,7 +585,10 @@ class RocketLander(gym.Env):
             # Potential-based shaping: each step pays the improvement of
             # (distance to the ship + speed + tilt), so getting closer and slowing
             # down are rewarded along the way without changing the best policy.
-            shaping = -R["shaping"] * (distance + speed + abs(angle))
+            altitude = max(0.0, pos.y - self.shipheight)
+            v_safe = 2.0 + math.sqrt(6.0 * altitude)
+            too_fast = max(0.0, -vy - v_safe) / START_SPEED
+            shaping = -R["shaping"] * (distance + speed + abs(angle)) - R["descent"] * too_fast
             shaping += 0.1 * (self.legs[0].ground_contact + self.legs[1].ground_contact)
             if self.prev_shaping is not None:
                 reward += shaping - self.prev_shaping
@@ -603,9 +609,7 @@ class RocketLander(gym.Env):
 
         if not groundcontact:
             reward -= R["time"]
-            altitude = max(0.0, pos.y - self.shipheight)
-            v_safe = 2.0 + math.sqrt(6.0 * altitude)
-            reward -= R["descent"] * max(0.0, -vy - v_safe) / START_SPEED
+
         if success:
             # up to +success, and up to +center more for landing on the ship's center
             reward += R["success"] + R["center"] * (1 - min(1.0, abs(pos.x - W / 2) / (self.ship_width / 2)))
