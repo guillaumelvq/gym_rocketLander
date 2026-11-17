@@ -107,11 +107,48 @@
           <span class="spacer"></span>
           <button id="add-arena" class="ghost">+ Arène</button>
         </div>
+        <div class="player-bar">
+          <label class="field inline">Joueur
+            <input id="player-name" type="text" maxlength="30" placeholder="ton prénom">
+          </label>
+          <label class="field inline">Commandes
+            <select id="controls">
+              <option value="simple">Simple (flèches)</option>
+              <option value="expert">Expert</option>
+            </select>
+          </label>
+          <p id="keys-help" class="hint keys-help"></p>
+        </div>
         <div id="arenas" class="arenas"></div>
-        <p class="hint keys-help">
-          Pilote humain : <kbd>↑</kbd><kbd>↓</kbd> poussée · <kbd>←</kbd><kbd>→</kbd> orienter le moteur ·
-          <kbd>Q</kbd><kbd>D</kbd> propulseurs latéraux · <kbd>Espace</kbd> relancer
-        </p>
+
+        <div class="board-wrap">
+          <section id="last-result" class="panel result" hidden>
+            <div class="panel-head"><h2>Ta dernière tentative</h2></div>
+            <div class="result-title"></div>
+            <div class="result-stats"></div>
+            <div class="result-charts">
+              <canvas class="alt"></canvas>
+              <canvas class="vy"></canvas>
+            </div>
+            <div class="legend"><span><i style="background:var(--accent)"></i>toi</span><span><i style="background:var(--info)"></i>autopilote (même graine)</span><span><i style="background:var(--bad)"></i>limite de casse</span></div>
+            <p class="result-ref hint"></p>
+            <div class="run-actions">
+              <button class="small again">↻ Réessayer</button>
+              <button class="small ghost replay">▶ Revoir</button>
+              <button class="small ghost compare">⚔ Comparer à l'IA</button>
+            </div>
+          </section>
+          <section class="panel board-panel">
+            <div class="panel-head"><h2>Classement · scénario actuel</h2><span id="board-count" class="hint inline"></span></div>
+            <div class="table-wrap">
+              <table id="board">
+                <thead><tr><th>#</th><th>Joueur</th><th></th><th class="num">Score</th><th class="num">Durée</th><th class="num">Carbu.</th><th class="num">Écart</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="hint">Réussites d'abord, puis meilleur score. Même scénario = mêmes règles et même départ (seule la graine change).</p>
+          </section>
+        </div>
       </section>
 
       <section id="tab-runs" class="tab-page">
@@ -152,6 +189,7 @@
       <div class="screen">
         <canvas></canvas>
         <div class="banner" hidden></div>
+        <div class="countdown" hidden></div>
       </div>
       <div class="arena-foot">
         <span class="stat"><b class="ret">0.00</b><small>reward de base</small></span>
