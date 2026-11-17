@@ -441,15 +441,20 @@ class Renderer {
 // ===================================================================== arenas
 
 const OUTCOMES = {
-  success: ["Atterrissage réussi", "success"],
-  crash: ["Crash", "fail"],
-  broken_leg: ["Pied cassé", "fail"],
-  outside: ["Sortie de l'écran", "fail"],
-  timeout: ["Temps écoulé", "timeout"],
+  success: ["Atterrissage réussi", "success", "✅"],
+  crash: ["Crash", "fail", "💥"],
+  broken_leg: ["Pied cassé", "fail", "🦵"],
+  outside: ["Sortie de l'écran", "fail", "↗️"],
+  timeout: ["Temps écoulé", "timeout", "⏱️"],
 };
+const outcomeIcon = (o) => (OUTCOMES[o] || ["", "", "❔"])[2];
+const outcomeLabel = (o) => (OUTCOMES[o] || [o])[0];
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const arenas = [];
 let focusedHuman = null;
+let BOARD = [];          // leaderboard rows of the current scenario
+const REPLAY_LABELS = {}; // attempt id -> label, for arenas showing a replay
 
 class Arena {
   constructor(agent = "autopilot") {
@@ -460,14 +465,19 @@ class Arena {
     this.renderer.camMode = $("#camera").value;
     this.select = $(".agent", node);
     this.banner = $(".banner", node);
+    this.countdownEl = $(".countdown", node);
     this.note = $(".arena-note", node);
     this.wins = 0; this.total = 0;
     this.ws = null;
     this.running = false;
+    this.scenario = null; // per-arena scenario override {level, config, label} (comparisons)
     this.fillAgents(agent);
-    this.select.addEventListener("change", () => { this.wins = this.total = 0; this.updateTally(); this.updateNote(); saveArenas(); this.start(); });
+    this.select.addEventListener("change", () => {
+      this.scenario = null;
+      this.wins = this.total = 0; this.updateTally(); this.updateNote(); saveArenas(); this.start();
+    });
     $(".remove", node).addEventListener("click", () => this.destroy());
-    node.addEventListener("pointerdown", () => { if (this.select.value === "human") focusedHuman = this; });
+    node.addEventListener("pointerdown", () => { if (this.select.value === "human") setFocusedHuman(this); });
     this.updateNote();
     this.connect();
   }
@@ -484,17 +494,30 @@ class Arena {
       for (const r of models) g.appendChild(new Option(`🧠 ${r.name}`, "model:" + r.name));
       this.select.appendChild(g);
     }
+    const replays = BOARD.slice(0, 15).map((a) => [a.id, `🎬 ${a.name} ${outcomeIcon(a.outcome)} ${fmt(a.score, 1)}`]);
+    if (prev?.startsWith("replay:") && !replays.some(([id]) => "replay:" + id === prev)) {
+      const id = prev.slice(7);
+      replays.unshift([id, REPLAY_LABELS[id] || `🎬 tentative ${id}`]);
+    }
+    if (replays.length) {
+      const g = document.createElement("optgroup"); g.label = "Tentatives humaines (replay)";
+      for (const [id, label] of replays) g.appendChild(new Option(label, "replay:" + id));
+      this.select.appendChild(g);
+    }
     this.select.value = [...this.select.options].some((o) => o.value === prev) ? prev : "autopilot";
   }
 
   updateNote() {
     const v = this.select.value;
     this.note.classList.remove("error");
+    let text = "";
     if (v.startsWith("model:")) {
       const r = RUNS.find((x) => x.name === v.slice(6));
-      this.note.textContent = r ? `Scénario d'entraînement : niveau ${r.level}${Object.keys(r.config || {}).length ? " + réglages" : ""}` : "";
-    } else if (v === "human") this.note.textContent = "Clique ici puis pilote au clavier.";
-    else this.note.textContent = "";
+      text = r ? `Scénario d'entraînement : niveau ${r.level}${Object.keys(r.config || {}).length ? " + réglages" : ""}` : "";
+    } else if (v.startsWith("replay:")) text = "Replay exact d'une tentative (sa graine et son scénario).";
+    else if (v === "human") text = focusedHuman === this ? "C'est toi qui pilotes ici." : "Clique ici pour piloter cette arène.";
+    if (this.scenario && !v.startsWith("replay:")) text = `Scénario de ${this.scenario.label}`;
+    this.note.textContent = text;
   }
 
   connect() {
@@ -509,21 +532,49 @@ class Arena {
   start(seed = Number($("#seed").value)) {
     if (this.ws?.readyState !== 1) { setTimeout(() => this.start(seed), 200); return; }
     const v = this.select.value;
-    const msg = { type: "start", seed, speed: Number($("#speed").value), level: state.level, config: state.config,
+    const scen = this.scenario || { level: state.level, config: state.config };
+    const msg = { type: "start", seed, speed: Number($("#speed").value), level: scen.level, config: scen.config,
                   reward: state.reward, reward_code: state.code };
-    if (v.startsWith("model:")) Object.assign(msg, { agent: "model", run: v.slice(6), which: "best" });
+    if (v.startsWith("model:")) Object.assign(msg, { agent: "model", run: v.slice(6), which: "best", override_scenario: !!this.scenario });
+    else if (v.startsWith("replay:")) Object.assign(msg, { agent: "replay", attempt: v.slice(7) });
     else msg.agent = v;
-    if (v === "human") { focusedHuman = this; human.reset(); }
+    this.awaitingGo = false;
+    if (v === "human") {
+      setFocusedHuman(this);
+      Object.assign(msg, { controls: $("#controls").value, player: playerName(), countdown: true, speed: 1 });
+      this.awaitingGo = true;
+      human.keys.clear();
+    }
+    clearInterval(this.countdownTimer);
+    this.countdownEl.hidden = true;
     this.banner.hidden = true;
-    this.note.classList.remove("error");
     this.updateNote();
     this.running = true;
     this.send(msg);
   }
 
+  runCountdown() {
+    let n = 3;
+    const el = this.countdownEl;
+    el.hidden = false; el.textContent = n;
+    clearInterval(this.countdownTimer);
+    this.countdownTimer = setInterval(() => {
+      n -= 1;
+      if (n > 0) { el.textContent = n; return; }
+      clearInterval(this.countdownTimer);
+      el.textContent = "Go !";
+      this.send({ type: "keys", keys: human.serverKeys() });
+      this.send({ type: "go" });
+      setTimeout(() => { el.hidden = true; }, 500);
+    }, 700);
+  }
+
   onMessage(m) {
-    if (m.type === "init") { this.renderer.setWorld(m.world); this.renderer.config = m.config; this.frameSkip = m.frame_skip; }
-    else if (m.type === "frame") {
+    if (m.type === "init") {
+      this.renderer.setWorld(m.world); this.renderer.config = m.config; this.frameSkip = m.frame_skip;
+      if (m.attempt) this.note.textContent = `Replay : ${m.attempt.name} · ${outcomeLabel(m.attempt.outcome)} · graine ${m.attempt.seed}`;
+      if (this.awaitingGo) { this.awaitingGo = false; this.runCountdown(); }
+    } else if (m.type === "frame") {
       this.renderer.setFrame(m);
       $(".ret", this.node).textContent = fmt(m.return);
       $(".cret", this.node).textContent = m.custom_return == null ? "–" : fmt(m.custom_return);
@@ -536,7 +587,10 @@ class Arena {
       this.banner.className = `banner ${cls}`;
       this.banner.innerHTML = `${label}<small>${extra}</small>`;
       this.banner.hidden = false;
-      if ($("#loop").checked) setTimeout(() => { if (!this.running) this.start(Number($("#seed").value) + this.total); }, 1200);
+      if (m.attempt) { showResult(m); refreshBoard(); }
+      if ($("#loop").checked && this.select.value !== "human") {
+        setTimeout(() => { if (!this.running) this.start(Number($("#seed").value) + this.total); }, 1200);
+      }
     } else if (m.type === "error") {
       this.note.textContent = m.message; this.note.classList.add("error");
     }
@@ -546,6 +600,7 @@ class Arena {
 
   destroy() {
     this.destroyed = true;
+    clearInterval(this.countdownTimer);
     this.ws?.close();
     this.node.remove();
     arenas.splice(arenas.indexOf(this), 1);
@@ -553,40 +608,187 @@ class Arena {
   }
 }
 
+function setFocusedHuman(arena) {
+  focusedHuman = arena;
+  arenas.forEach((a) => { a.node.classList.toggle("focused", a === arena); a.updateNote(); });
+}
+
 function saveArenas() { store.set("arenas", arenas.map((a) => a.select.value)); }
 
 function addArena(agent) { const a = new Arena(agent); arenas.push(a); saveArenas(); return a; }
 
-// keyboard pilot: direct setpoints (gimbal, throttle, side thruster)
+function playerName() { return ($("#player-name").value || "").trim() || "Anonyme"; }
+
+// keyboard: the page only sends which keys are held, the server turns them into actions
+// (frame by frame, so attempts are recorded and replayed exactly)
+const KEYMAP = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", KeyA: "side_left", KeyQ: "side_left", KeyD: "side_right" };
 const human = {
-  keys: new Set(), throttle: 0,
-  reset() { this.throttle = 0; },
-  action() {
-    const k = this.keys;
-    const g = (k.has("ArrowRight") ? 1 : 0) - (k.has("ArrowLeft") ? 1 : 0);
-    const side = (k.has("KeyA") || k.has("KeyQ") ? 1 : 0) - (k.has("KeyD") ? 1 : 0);
-    return [g, this.throttle > 0.001 ? this.throttle : -1, side];
-  },
+  keys: new Set(),
+  serverKeys() { return [...new Set([...this.keys].map((k) => KEYMAP[k]).filter(Boolean))]; },
 };
-setInterval(() => {
-  const k = human.keys;
-  if (k.has("ArrowUp")) human.throttle = Math.min(1, human.throttle + 0.04);
-  if (k.has("ArrowDown")) human.throttle = Math.max(0, human.throttle - 0.06);
-  const target = focusedHuman && arenas.includes(focusedHuman) ? focusedHuman : arenas.find((a) => a.select.value === "human");
-  if (target?.running) target.send({ type: "action", action: human.action() });
-}, 33);
+function humanTarget() { return focusedHuman && arenas.includes(focusedHuman) ? focusedHuman : arenas.find((a) => a.select.value === "human"); }
+function sendKeys() { const t = humanTarget(); if (t?.running) t.send({ type: "keys", keys: human.serverKeys() }); }
+setInterval(sendKeys, 150); // resend regularly in case a message was lost
 window.addEventListener("keydown", (e) => {
   if (e.target.matches("textarea, input, select")) return;
-  const handled = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyA", "KeyQ", "KeyD", "Space"];
-  if (!handled.includes(e.code)) return;
+  if (e.code === "Space") { e.preventDefault(); startAll(); return; }
+  if (!KEYMAP[e.code]) return;
   e.preventDefault();
-  if (e.code === "Space") { startAll(); return; }
-  human.keys.add(e.code);
+  if (!human.keys.has(e.code)) { human.keys.add(e.code); sendKeys(); }
 });
-window.addEventListener("keyup", (e) => human.keys.delete(e.code));
-window.addEventListener("blur", () => human.keys.clear());
+window.addEventListener("keyup", (e) => { if (human.keys.delete(e.code)) sendKeys(); });
+window.addEventListener("blur", () => { human.keys.clear(); sendKeys(); });
+
+const CONTROLS_HELP = {
+  simple: "Mode simple : <kbd>↑</kbd> moteur (relâcher = coupé) · <kbd>←</kbd><kbd>→</kbd> tourner la fusée (elle se stabilise seule quand tu lâches) · <kbd>Espace</kbd> relancer",
+  expert: "Mode expert : <kbd>↑</kbd><kbd>↓</kbd> monter / baisser la poussée · <kbd>←</kbd><kbd>→</kbd> orienter le moteur · <kbd>Q</kbd><kbd>D</kbd> propulseurs latéraux · <kbd>Espace</kbd> relancer",
+};
+function updateControlsHelp() { $("#keys-help").innerHTML = CONTROLS_HELP[$("#controls").value]; }
 
 function startAll() { for (const a of arenas) { a.wins = a.total = 0; a.updateTally(); a.start(); } }
+window.rrl = { arenas, human }; // handy from the browser console (and for automated UI checks)
+
+// ---------------------------------------------------------------- leaderboard + result
+
+function boardScenario() { return { level: state.level, config: state.config }; }
+
+async function refreshBoard() {
+  const scen = boardScenario();
+  const params = new URLSearchParams({ level: scen.level, config: JSON.stringify(scen.config) });
+  let data;
+  try { data = await (await fetch(`/api/attempts?${params}`)).json(); } catch { return; }
+  BOARD = data.attempts || [];
+  BOARD.forEach((a) => { REPLAY_LABELS[a.id] = `🎬 ${a.name} ${outcomeIcon(a.outcome)} ${fmt(a.score, 1)}`; });
+  $("#board-count").textContent = data.count ? `${data.count} tentative${data.count > 1 ? "s" : ""}` : "";
+  const body = $("#board tbody");
+  if (!BOARD.length) {
+    body.innerHTML = `<tr><td colspan="8" class="empty-row">Personne n'a encore tenté ce scénario. Choisis « Humain » dans une arène et lance !</td></tr>`;
+  } else {
+    body.innerHTML = BOARD.map((a) => `
+      <tr data-id="${a.id}">
+        <td class="rank">${a.rank}</td>
+        <td class="who">${esc(a.name)}<small>${a.controls === "expert" ? "expert" : "simple"}</small></td>
+        <td title="${outcomeLabel(a.outcome)}">${outcomeIcon(a.outcome)}</td>
+        <td class="num">${fmt(a.score, 1)}</td>
+        <td class="num">${fmt(a.duration, 1)} s</td>
+        <td class="num">${Math.round(a.fuel * 100)}%</td>
+        <td class="num">${a.outcome === "success" ? fmt(Math.abs(a.x_on_ship), 2) : "–"}</td>
+        <td class="acts">
+          <button class="small ghost" data-act="replay" title="Revoir cette tentative">▶ Revoir</button>
+          <button class="small ghost" data-act="compare" title="Rejouer à côté de l'autopilote et du meilleur agent">⚔ IA</button>
+          <button class="small ghost icon" data-act="delete" title="Supprimer" aria-label="Supprimer">✕</button>
+        </td>
+      </tr>`).join("");
+  }
+  arenas.forEach((a) => a.fillAgents());
+}
+
+async function boardAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = btn.closest("tr").dataset.id;
+  const act = btn.dataset.act;
+  if (act === "replay") watchReplay(id);
+  else if (act === "compare") compareWithAI(id);
+  else if (act === "delete") {
+    const a = BOARD.find((x) => x.id === id);
+    if (!confirm(`Supprimer la tentative de ${a?.name || id} ?`)) return;
+    await fetch(`/api/attempts/${id}`, { method: "DELETE" });
+    refreshBoard();
+  }
+}
+
+function watchReplay(id) {
+  switchTab("arena");
+  const a = arenas[0] || addArena();
+  a.scenario = null;
+  a.fillAgents("replay:" + id);
+  a.wins = a.total = 0; a.updateTally(); saveArenas();
+  a.start();
+}
+
+async function compareWithAI(id) {
+  switchTab("arena");
+  const attempt = await (await fetch(`/api/attempts/${id}`)).json();
+  const scenario = { level: attempt.level, config: attempt.config, label: `la tentative de ${attempt.name}` };
+  const best = [...RUNS].filter((r) => r.has_best || r.has_last)
+    .sort((a, b) => (b.eval?.success_rate ?? -1) - (a.eval?.success_rate ?? -1))[0];
+  const wanted = ["replay:" + id, "autopilot", ...(best ? ["model:" + best.name] : [])];
+  while (arenas.length < wanted.length) addArena("autopilot");
+  wanted.forEach((agent, i) => {
+    const a = arenas[i];
+    a.fillAgents(agent);
+    a.scenario = agent.startsWith("replay:") ? null : scenario;
+    a.wins = a.total = 0; a.updateTally(); a.updateNote();
+  });
+  saveArenas();
+  $("#seed").value = attempt.seed;
+  wanted.forEach((_, i) => arenas[i].start(attempt.seed));
+}
+
+function showResult(m) {
+  const a = m.attempt;
+  const card = $("#last-result");
+  card.hidden = false;
+  const [label, cls] = OUTCOMES[a.outcome] || [a.outcome, "fail"];
+  $(".result-title", card).innerHTML = `<span class="pill ${cls === "success" ? "done" : cls === "timeout" ? "stopped" : "failed"}">${outcomeIcon(a.outcome)} ${label}</span> ${esc(a.name)}`;
+  const td = a.touchdown_vy == null ? "–" : `${fmt(-a.touchdown_vy, 1)} m/s`;
+  const lim = a.touchdown_limit == null ? "pieds incassables" : `limite ${fmt(a.touchdown_limit, 1)} m/s`;
+  const tdBad = a.touchdown_vy != null && a.touchdown_limit != null && -a.touchdown_vy > a.touchdown_limit;
+  const ap = m.autopilot;
+  const stat = (v, l, bad) => `<span class="stat"><b${bad ? ' class="bad"' : ""}>${v}</b><small>${l}</small></span>`;
+  $(".result-stats", card).innerHTML =
+    stat(`${a.rank} / ${a.total}`, "classement") + stat(fmt(a.score, 1), "score") +
+    stat(`${fmt(a.duration, 1)} s`, "durée") + stat(`${Math.round(a.fuel * 100)}%`, "carburant restant") +
+    stat(a.outcome === "success" ? fmt(Math.abs(a.x_on_ship), 2) : "–", "écart au centre (0 = parfait)") +
+    stat(td, `vitesse au contact (${lim})`, tdBad);
+  $(".result-ref", card).textContent = ap
+    ? `Autopilote sur la même graine : ${outcomeIcon(ap.outcome)} ${outcomeLabel(ap.outcome)}, score ${fmt(ap.score, 1)}.`
+    : "";
+  card.dataset.id = a.id;
+  drawTrajectories($("canvas.alt", card), a.trajectory, ap?.trajectory, 1, "Altitude (m)");
+  drawTrajectories($("canvas.vy", card), a.trajectory, ap?.trajectory, 2, "Vitesse verticale (m/s)", a.touchdown_limit);
+}
+
+function drawTrajectories(canvas, mine, ref, idx, title, limit) {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+  const c = canvas.getContext("2d"), w = canvas.width, h = canvas.height;
+  const css = getComputedStyle(document.documentElement);
+  const col = (n) => css.getPropertyValue(n).trim();
+  const pad = { l: 34 * dpr, r: 8 * dpr, t: 16 * dpr, b: 16 * dpr };
+  c.clearRect(0, 0, w, h);
+  const all = [...(mine || []), ...(ref || [])];
+  if (!all.length) return;
+  const tMax = Math.max(...all.map((p) => p[0]));
+  let vals = all.map((p) => p[idx]);
+  if (limit != null) vals = vals.concat([-limit]);
+  let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+  if (hi - lo < 1) hi = lo + 1;
+  const X = (t) => pad.l + (t / tMax) * (w - pad.l - pad.r);
+  const Y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (h - pad.t - pad.b);
+  c.font = `${10 * dpr}px system-ui`; c.fillStyle = col("--muted"); c.textAlign = "left";
+  c.fillText(title, pad.l, 11 * dpr);
+  c.textAlign = "right";
+  c.fillText(Math.round(hi), pad.l - 4 * dpr, Y(hi) + 4 * dpr);
+  c.fillText(Math.round(lo), pad.l - 4 * dpr, Y(lo));
+  c.textAlign = "center"; c.fillText(`${(tMax / 60).toFixed(0)} s`, w - 14 * dpr, h - 3 * dpr);
+  c.strokeStyle = col("--line"); c.lineWidth = dpr;
+  c.beginPath(); c.moveTo(pad.l, Y(0)); c.lineTo(w - pad.r, Y(0)); c.stroke();
+  if (limit != null) {
+    c.strokeStyle = col("--bad"); c.setLineDash([4 * dpr, 4 * dpr]);
+    c.beginPath(); c.moveTo(pad.l, Y(-limit)); c.lineTo(w - pad.r, Y(-limit)); c.stroke(); c.setLineDash([]);
+  }
+  const line = (pts, color, dash) => {
+    if (!pts?.length) return;
+    c.strokeStyle = color; c.lineWidth = 2 * dpr; c.setLineDash(dash ? [5 * dpr, 4 * dpr] : []);
+    c.beginPath(); pts.forEach((p, i) => (i ? c.lineTo(X(p[0]), Y(p[idx])) : c.moveTo(X(p[0]), Y(p[idx])))); c.stroke();
+    c.setLineDash([]);
+  };
+  line(ref, col("--info"), true);
+  line(mine, col("--accent"), false);
+}
 
 function initArena() {
   $("#play-all").addEventListener("click", startAll);
@@ -594,8 +796,26 @@ function initArena() {
   $("#seed-random").addEventListener("click", () => { $("#seed").value = Math.floor(Math.random() * 10000); });
   $("#speed").addEventListener("change", () => arenas.forEach((a) => a.send({ type: "speed", value: Number($("#speed").value) })));
   $("#camera").addEventListener("change", () => arenas.forEach((a) => { a.renderer.camMode = $("#camera").value; }));
+  const name = $("#player-name");
+  name.value = store.get("player", "");
+  name.addEventListener("input", () => store.set("player", name.value));
+  const controls = $("#controls");
+  controls.value = store.get("controls", "simple");
+  controls.addEventListener("change", () => { store.set("controls", controls.value); updateControlsHelp(); });
+  updateControlsHelp();
+  $("#board").addEventListener("click", boardAction);
+  $("#last-result .replay").addEventListener("click", () => watchReplay($("#last-result").dataset.id));
+  $("#last-result .compare").addEventListener("click", () => compareWithAI($("#last-result").dataset.id));
+  $("#last-result .again").addEventListener("click", () => { const a = humanTarget(); if (a) a.start(); });
   const saved = store.get("arenas", null);
   (saved?.length ? saved : ["autopilot", "human"]).forEach((v) => addArena(v));
+  refreshBoard();
+  // the scenario may change in the sidebar: keep the leaderboard in sync
+  let lastScen = "";
+  setInterval(() => {
+    const s = JSON.stringify(boardScenario());
+    if (s !== lastScen) { lastScen = s; refreshBoard(); }
+  }, 1000);
   const loop = (t) => { arenas.forEach((a) => a.renderer.draw(t)); requestAnimationFrame(loop); };
   requestAnimationFrame(loop);
 }
@@ -719,6 +939,7 @@ async function refreshRuns() {
 function watchRun(name) {
   switchTab("arena");
   const a = arenas[0] || addArena();
+  a.scenario = null;
   a.fillAgents("model:" + name);
   a.select.value = "model:" + name;
   a.wins = a.total = 0; a.updateTally(); a.updateNote(); saveArenas();

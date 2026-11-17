@@ -164,3 +164,9 @@ def test_successes_rank_first():
 def test_rle_roundtrip():
     actions = [[0.0, -1.0, 0.0]] * 5 + [[0.25, 1.0, -1.0]] * 2 + [[0.0, -1.0, 0.0]]
     assert server._rle_decode(server._rle_encode(actions)) == actions
+
+
+def test_signature_ignores_int_float_differences():
+    cfg = dict(RL.level_config(1), fuel=700, max_steps=1500)
+    assert server.scenario_signature(1, cfg) == server.scenario_signature(1, dict(cfg, fuel=700.0))
+    assert server.scenario_signature(1, cfg) != server.scenario_signature(1, dict(cfg, ship_width=0.5))

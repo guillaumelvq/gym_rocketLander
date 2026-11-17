@@ -76,12 +76,32 @@ directement les arènes.
 - Un agent entraîné joue dans **le scénario de son entraînement**, pas celui de la barre
   latérale.
 
-Pilotage clavier : `↑` / `↓` pour la poussée, `←` / `→` pour orienter le moteur, `Q` / `D`
-pour les propulseurs latéraux. Clique d'abord dans l'arène du pilote humain.
-
 Le HUD affiche l'altitude, les vitesses, l'inclinaison, le nombre de tours, la poussée, le
 carburant et le contact de chaque pied. La vitesse verticale passe au rouge si elle dépasse
 la limite de casse près du sol.
+
+### Mode joueur : à toi de te poser
+
+1. Choisis **🧑 Humain** dans une arène, écris ton prénom dans **Joueur**, puis clique dans
+   l'arène et appuie sur **▶ Lancer** (ou `Espace`). Un compte à rebours 3-2-1 te laisse le
+   temps de te préparer.
+2. Commandes :
+   - **Simple** (par défaut, flèches seulement) : `↑` allume le moteur tant que tu appuies,
+     `←` / `→` font tourner la fusée. Quand tu lâches, elle se stabilise seule.
+   - **Expert** : `↑` / `↓` montent ou baissent la poussée (qui reste réglée), `←` / `→`
+     orientent le moteur, `Q` / `D` déclenchent les propulseurs latéraux.
+3. À la fin, la carte **Ta dernière tentative** affiche ton rang, ton score, la durée, le
+   carburant restant, l'écart au centre et ta vitesse au contact comparée à la limite. Les
+   courbes d'altitude et de vitesse verticale sont superposées à celles de l'autopilote, sur
+   le même départ.
+4. Le **Classement** liste les tentatives du scénario actuel : réussites d'abord, puis
+   meilleur score. Chaque ligne propose :
+   - **▶ Revoir** : rejoue exactement la tentative, image par image ;
+   - **⚔ IA** : la rejoue à côté de l'autopilote et du meilleur agent entraîné, avec le même
+     départ.
+
+Les tentatives sont enregistrées dans `players/attempts.jsonl`, avec les actions de chaque
+image, ce qui permet de les rejouer à l'identique.
 
 ### Adapter la reward
 

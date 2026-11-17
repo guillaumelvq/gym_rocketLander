@@ -253,8 +253,10 @@ def _effective_config(level: int, config: dict) -> dict:
 def scenario_signature(level: int, config: dict) -> str:
     """Identifies a scenario for the leaderboard: same signature = same rules and start."""
     cfg = _effective_config(level, config)
-    blob = json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in sorted(cfg.items())},
-                      sort_keys=True)
+    # numbers normalized: the page sends 700 where Python has 700.0
+    norm = {k: (round(float(v), 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+            for k, v in cfg.items()}
+    blob = json.dumps(norm, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
