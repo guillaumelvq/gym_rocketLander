@@ -73,6 +73,8 @@ def main():
         # value function well conditioned (as in RL Zoo for LunarLanderContinuous).
         # Only training rewards are scaled; the saved policy needs no statistics.
         env = VecNormalize(env, norm_obs=False, norm_reward=True, gamma=args.gamma)
+        # EvalCallback requires the same wrapper on the eval env (here a no-op)
+        eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
     # PPO hyperparameters from RL Zoo (LunarLanderContinuous), a very similar task
     kwargs = dict(n_steps=1024, batch_size=64, n_epochs=4, gamma=args.gamma, gae_lambda=0.98,
                   ent_coef=0.01, learning_rate=3e-4) if args.algo == "PPO" else dict(gamma=args.gamma)
