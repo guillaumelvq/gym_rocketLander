@@ -37,3 +37,8 @@ tutorial/*.html
 # PyCharm project files
 .idea
 vizdoom.ini
+
+# uv
+.venv/
+runs/
+models/

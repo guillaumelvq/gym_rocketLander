@@ -1,4 +1,3 @@
-import distutils.version
 import os
 import sys
 import warnings
