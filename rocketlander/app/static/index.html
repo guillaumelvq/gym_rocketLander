@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rocket RL Lab</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2c5 5 6 12 4 20h-8C10 14 11 7 16 2z' fill='%23e8edf6'/><path d='M12 22l-4 6 6-3zM20 22l4 6-6-3z' fill='%23ff8a3d'/></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2c5 5 6 12 4 20h-8C10 14 11 7 16 2z" fill="currentColor"/><path d="M12 22l-4 6 6-3zM20 22l4 6-6-3z" fill="var(--accent)"/></svg>
+      <span>Rocket RL Lab</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="arena" role="tab">Arène</button>
+      <button class="tab" data-tab="runs" role="tab">Entraînements <span id="runs-badge" class="badge" hidden></span></button>
+    </nav>
+    <div class="top-actions">
+      <button id="theme-toggle" class="ghost icon" title="Thème clair / sombre" aria-label="Thème">◐</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- ================= sidebar: shared scenario + reward ================= -->
+    <aside class="sidebar">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Défi</h2>
+        </div>
+        <select id="challenge"></select>
+        <p id="challenge-goal" class="hint"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Scénario</h2>
+          <button id="reset-level" class="ghost small" title="Remettre les valeurs du niveau">Réinitialiser</button>
+        </div>
+        <label class="field">
+          <span>Niveau de difficulté</span>
+          <select id="level"></select>
+        </label>
+        <p id="level-desc" class="hint"></p>
+        <div id="config-fields" class="fields"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Reward</h2>
+          <span class="hint inline">appelée 60×/s</span>
+        </div>
+        <div class="editor-wrap">
+          <textarea id="reward-code" spellcheck="false" autocomplete="off"></textarea>
+        </div>
+        <details class="keys">
+          <summary>Ce que contient <code>s</code></summary>
+          <div id="s-keys" class="s-keys"></div>
+        </details>
+        <details>
+          <summary>Poids de la reward de base</summary>
+          <div id="reward-fields" class="fields"></div>
+        </details>
+      </section>
+    </aside>
+
+    <!-- ================= main ================= -->
+    <main>
+      <section id="tab-arena" class="tab-page active">
+        <div class="toolbar">
+          <button id="play-all" class="primary">▶ Lancer</button>
+          <label class="field inline">Graine
+            <input id="seed" type="number" value="0" min="0" step="1">
+          </label>
+          <button id="seed-random" class="ghost small" title="Graine aléatoire">🎲</button>
+          <label class="field inline">Vitesse
+            <select id="speed">
+              <option value="0.25">×0.25</option><option value="0.5">×0.5</option>
+              <option value="1" selected>×1</option><option value="2">×2</option>
+              <option value="4">×4</option><option value="8">×8</option>
+            </select>
+          </label>
+          <label class="field inline">Caméra
+            <select id="camera">
+              <option value="auto" selected>Auto</option>
+              <option value="wide">Plan large</option>
+              <option value="follow">Suivi</option>
+            </select>
+          </label>
+          <label class="check"><input id="loop" type="checkbox"> Enchaîner</label>
+          <span class="spacer"></span>
+          <button id="add-arena" class="ghost">+ Arène</button>
+        </div>
+        <div id="arenas" class="arenas"></div>
+        <p class="hint keys-help">
+          Pilote humain : <kbd>↑</kbd><kbd>↓</kbd> poussée · <kbd>←</kbd><kbd>→</kbd> orienter le moteur ·
+          <kbd>Q</kbd><kbd>D</kbd> propulseurs latéraux · <kbd>Espace</kbd> relancer
+        </p>
+      </section>
+
+      <section id="tab-runs" class="tab-page">
+        <div class="train-form panel">
+          <div class="panel-head"><h2>Nouvel entraînement</h2>
+            <span class="hint inline">utilise le défi, le scénario et la reward de gauche</span></div>
+          <div class="form-grid">
+            <label class="field"><span>Nom</span><input id="run-name" type="text" placeholder="mon-agent"></label>
+            <label class="field"><span>Algorithme</span>
+              <select id="algo"><option>PPO</option><option>A2C</option></select></label>
+            <label class="field"><span>Actions</span>
+              <select id="mode"><option value="cont">Continues</option><option value="disc">Discrètes</option></select></label>
+            <label class="field"><span>Durée</span>
+              <select id="timesteps">
+                <option value="50000">50k pas (~2 min)</option>
+                <option value="200000">200k pas</option>
+                <option value="500000" selected>500k pas</option>
+                <option value="1000000">1M pas</option>
+                <option value="2000000">2M pas</option>
+              </select></label>
+            <label class="field"><span>Gamma</span>
+              <select id="gamma"><option>0.99</option><option>0.995</option><option selected>0.999</option></select></label>
+            <button id="train" class="primary">Lancer l'entraînement</button>
+          </div>
+          <p id="train-msg" class="msg" hidden></p>
+        </div>
+        <div id="runs" class="runs"></div>
+      </section>
+    </main>
+  </div>
+
+  <template id="arena-tpl">
+    <article class="arena">
+      <div class="arena-head">
+        <select class="agent"></select>
+        <button class="ghost small icon remove" title="Retirer cette arène" aria-label="Retirer">✕</button>
+      </div>
+      <div class="screen">
+        <canvas></canvas>
+        <div class="banner" hidden></div>
+      </div>
+      <div class="arena-foot">
+        <span class="stat"><b class="ret">0.00</b><small>reward de base</small></span>
+        <span class="stat"><b class="cret">–</b><small>votre reward</small></span>
+        <span class="stat"><b class="tally">0 / 0</b><small>réussites</small></span>
+      </div>
+      <p class="arena-note hint"></p>
+    </article>
+  </template>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

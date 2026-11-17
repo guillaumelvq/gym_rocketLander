@@ -76,7 +76,7 @@ def test_free_fall_ends_with_crash():
     env.reset()
     _, rews = rollout(env, [np.array([0.0, -1.0, 0.0])] * 2000)
     assert env.game_over and env.good_landings == 0
-    assert rews[-1] == -1.0  # crash is penalized
+    assert rews[-1] <= -env.reward_params["crash"] + 1  # crash is penalized
     assert rews.sum() < 0.0  # crashing is never a net win
 
 
@@ -90,3 +90,38 @@ def test_ground_contact_is_not_farmable():
     _, r2, _, _ = env.step(np.zeros(3))
     assert r2 < 0.5
 
+
+
+def test_levels_are_monotonic():
+    from gym.envs.box2d.rocket_lander import level_config
+
+    prev = level_config(0)
+    for level in range(1, 21):
+        cfg = level_config(level)
+        lim, prev_lim = cfg["max_touchdown_speed"], prev["max_touchdown_speed"]
+        assert prev_lim is None or lim <= prev_lim
+        assert cfg["leg_scale"] <= prev["leg_scale"]
+        assert cfg["start_x_spread"] >= prev["start_x_spread"]
+        assert cfg["hard_landing_breaks"] >= prev["hard_landing_breaks"]
+        prev = cfg
+
+
+def test_config_overrides():
+    env = RocketLander(level_number=5, config={"ship_width": 0.5, "start_x": 0.3, "start_x_spread": 0.0,
+                                                "start_speed": 10.0, "end_on_landing": False})
+    env.seed(0)
+    env.reset()
+    from gym.envs.box2d.rocket_lander import SHIP_WIDTH, W
+    assert env.ship_width == pytest.approx(SHIP_WIDTH * 0.5)
+    assert env.lander.position.x == pytest.approx(W / 2 + 0.3 * W, abs=1.0)
+    assert env.lander.linearVelocity.y > -12
+    with pytest.raises(ValueError):
+        RocketLander(config={"typo": 1})
+
+
+def test_no_fuel_no_thrust():
+    env = RocketLander(config={"fuel": 0.0})
+    env.seed(0)
+    env.reset()
+    env.step(np.array([0.0, 1.0, 0.0]))
+    assert env.power == 0

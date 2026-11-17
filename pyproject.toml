@@ -24,6 +24,16 @@ rl = [
     "tqdm",
     "rich",
 ]
+app = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+notebook = [
+    "ipykernel>=6.29",
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+    "imageio[ffmpeg]>=2.35",
+]
 dev = ["pytest>=8", "mock"]
 
 [build-system]
@@ -31,13 +41,14 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["gym*"]
+include = ["gym*", "rocketlander*"]
 
 [tool.setuptools.package-data]
+rocketlander = ["app/static/*"]
 gym = ["envs/classic_control/assets/*.png", "envs/mujoco/assets/*.xml"]
 
 [tool.uv]
-default-groups = ["dev", "rl"]
+default-groups = ["dev", "rl", "notebook", "app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

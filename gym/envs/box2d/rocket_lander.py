@@ -1,5 +1,7 @@
-import numpy as np
+import math
 import os
+
+import numpy as np
 import pyglet
 import Box2D
 from Box2D.b2 import (
@@ -14,13 +16,6 @@ from Box2D.b2 import (
 import gym
 from gym import spaces
 from gym.utils import seeding
-
-
-def compute_leg_length(LEG_LENGTH, level):
-    if level > 2:
-        return LEG_LENGTH * 0.1
-    else:
-        return LEG_LENGTH
 
 
 """
@@ -65,10 +60,70 @@ FPS = 60
 SCALE_S = 0.35  # Temporal Scaling, lower is faster - adjust forces appropriately
 INITIAL_RANDOM = 0.0  # Random scaling of initial velocity, higher is more difficult
 
+MAX_STEPS = 1000  # episode length; not landing in time counts as a failure
+
+# Default reward. Per-step terms are small, terminal terms are large.
+REWARD = {
+    "shaping": 1.0,   # weight of the (distance + speed + tilt) potential
+    "time": 0.01,     # per step spent in the air
+    "success": 10.0,  # landed and stayed 1 s on the ship
+    "center": 5.0,    # extra, full when landing on the ship's center
+    "crash": 5.0,     # hull touched, broken leg, left the screen
+    "timeout": 5.0,   # still flying after MAX_STEPS
+}
+
+FUEL_CAPACITY = 700.0  # consumed by `power` (0.4-1.0) each step the main engine runs
+LANDED_SPEED = 0.2  # (in units of START_SPEED) max speed to count as "landed"
+
+# Scenario parameters. A difficulty level is a preset of these values (see level_config);
+# any of them can be overridden with RocketLander(config={...}).
+DEFAULT_CONFIG = {
+    "ship_width": 1.0,             # landing zone width, x the default ship (~102 m)
+    "start_x": 0.0,                # start position, fraction of the screen width from the center
+    "start_x_spread": 0.03,        # +/- random offset added to start_x
+    "start_height": 0.95,          # fraction of the screen height (~385 m)
+    "start_speed": 40.0,           # initial falling speed, m/s
+    "start_spin": 1.0,             # max random initial angular velocity, rad/s
+    "start_drift": 0.0,            # random initial horizontal speed, fraction of start_speed
+    "max_touchdown_speed": None,   # m/s, legs break above this vertical speed (None: never)
+    "hard_landing_breaks": False,  # legs break if their joints are over-compressed
+    "leg_scale": 1.0,              # leg length multiplier
+    "end_on_landing": True,        # end the episode after 1 s landed (success)
+    "max_steps": 1500,             # physics frames (60 = 1 s = 25 s); then the episode fails
+    "fuel": FUEL_CAPACITY,
+    "control": "direct",           # continuous actions: "direct" setpoints or "rate" of change
+}
+
+
+def level_config(level: int) -> dict:
+    """Difficulty presets, monotonic: each level is at least as hard as the previous one.
+
+        0       legs never break (crashing at full speed on the ship still "lands")
+        1-9     legs break above a touchdown speed: 7.6 m/s at level 1 ... 4.4 m/s at level 9;
+                more random start position and drift
+        10-20   same 4.4 m/s limit + legs break on hard landings; from 11 the legs get
+                shorter (x0.93 per level, down to x0.3 at level 20)
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    level = int(level)
+    if level >= 1:
+        cfg["max_touchdown_speed"] = 8.0 - 0.4 * min(level, 9)
+    if level >= 2:
+        cfg["start_x_spread"] = 0.03 * (1 + 0.1 * min(level, 10))
+        cfg["start_drift"] = 0.2
+        cfg["start_spin"] = 1.2
+    if level >= 10:
+        cfg["hard_landing_breaks"] = True
+    if level >= 11:
+        cfg["leg_scale"] = max(0.3, 1.0 - 0.07 * (level - 10))
+    return cfg
+
 START_HEIGHT = 1000.0
 START_SPEED = 40.0
 
 # ROCKET
+GIMBAL_SLEW = 1.0 / 60  # max gimbal change per frame in "direct" control (rad)
+THROTTLE_SLEW = 3.0 / 60  # max throttle change per frame in "direct" control
 MIN_THROTTLE = 0.4
 GIMBAL_THRESHOLD = 0.4
 MAIN_ENGINE_POWER = 1600 * SCALE_S * 1.0
@@ -134,8 +189,19 @@ class ContactDetector(contactListener):
 class RocketLander(gym.Env):
     metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": FPS}
 
-    def __init__(self, level_number=0, continuous=True, speed_threshold=1):
+    """
+    level_number: difficulty preset, see level_config().
+    config: overrides of the scenario parameters, see DEFAULT_CONFIG.
+    reward_params: overrides of the default reward weights, see REWARD.
+    """
+
+    def __init__(self, level_number=0, continuous=True, reward_params=None, config=None):
         self.level_number = level_number
+        self.config = {**level_config(level_number), **(config or {})}
+        unknown = set(self.config) - set(DEFAULT_CONFIG)
+        if unknown:
+            raise ValueError(f"unknown config keys: {sorted(unknown)}")
+        self.reward_params = {**REWARD, **(reward_params or {})}
         self.seed()
         self.viewer = None
         self.episode_number = 0
@@ -154,7 +220,6 @@ class RocketLander(gym.Env):
         self.total_landed_ticks = 0
         self.landed_ticks = 0
         self.done = False
-        self.speed_threshold = speed_threshold
         # Observations are standardized with MEAN/VAR, so they are not bounded to [-1, 1].
         obs_dim = 10 if VEL_STATE else 7
         high = np.full(obs_dim, np.inf, dtype=np.float32)
@@ -201,16 +266,21 @@ class RocketLander(gym.Env):
         self.gimbal = 0.0
         self.total_landed_ticks += self.landed_ticks
         self.landed_ticks = 0
+        cfg = self.config
+        self.total_fuel = float(cfg["fuel"])
+        self.touch_down = False
+        self.total_rotation = 0.0  # cumulated rotation since the start, in turns (+ = counter-clockwise)
+        self.ship_width = SHIP_WIDTH * cfg["ship_width"]
+        self.leg_length = LEG_LENGTH * cfg["leg_scale"]
         self.stepnumber = 0
         self.smoke = []
 
         # self.terrainheigth = self.np_random.uniform(H / 20, H / 10)
         self.terrainheigth = H / 20
         self.shipheight = self.terrainheigth + SHIP_HEIGHT
-        # ship_pos = self.np_random.uniform(0, SHIP_WIDTH / SCALE) + SHIP_WIDTH / SCALE
         ship_pos = W / 2
-        self.helipad_x1 = ship_pos - SHIP_WIDTH / 2
-        self.helipad_x2 = self.helipad_x1 + SHIP_WIDTH
+        self.helipad_x1 = ship_pos - self.ship_width / 2
+        self.helipad_x2 = self.helipad_x1 + self.ship_width
         self.helipad_y = self.terrainheigth + SHIP_HEIGHT
 
         self.water = self.world.CreateStaticBody(
@@ -252,22 +322,22 @@ class RocketLander(gym.Env):
                         shape=polygonShape(
                             vertices=(
                                 (
-                                    ship_pos + side * 0.95 * SHIP_WIDTH / 2,
+                                    ship_pos + side * 0.95 * self.ship_width / 2,
                                     self.helipad_y,
                                 ),
                                 (
-                                    ship_pos + side * 0.95 * SHIP_WIDTH / 2,
+                                    ship_pos + side * 0.95 * self.ship_width / 2,
                                     self.helipad_y + SHIP_HEIGHT,
                                 ),
                                 (
                                     ship_pos
-                                    + side * 0.95 * SHIP_WIDTH / 2
+                                    + side * 0.95 * self.ship_width / 2
                                     - side * SHIP_HEIGHT,
                                     self.helipad_y + SHIP_HEIGHT,
                                 ),
                                 (
                                     ship_pos
-                                    + side * 0.95 * SHIP_WIDTH / 2
+                                    + side * 0.95 * self.ship_width / 2
                                     - side * SHIP_HEIGHT,
                                     self.helipad_y,
                                 ),
@@ -282,17 +352,10 @@ class RocketLander(gym.Env):
 
         self.ship.color1 = (0.2, 0.2, 0.2)
 
-        def initial_rocket_pos(level):
-
-            if level > 0:
-                initial_x = W / 2 + W * self.np_random.uniform(-0.3, 0.3)
-                initial_y = H * 0.95
-            else:
-                initial_x = W / 2 + W * self.np_random.uniform(-0.03, 0.03)
-                initial_y = H * 0.95
-            return initial_x, initial_y
-
-        initial_x, initial_y = initial_rocket_pos(self.level_number)
+        spread = cfg["start_x_spread"]
+        initial_x = W / 2 + W * (cfg["start_x"] + self.np_random.uniform(-spread, spread))
+        initial_x = float(np.clip(initial_x, 0.05 * W, 0.95 * W))
+        initial_y = H * float(np.clip(cfg["start_height"], 0.15, 0.97))
         self.lander = self.world.CreateDynamicBody(
             position=(initial_x, initial_y),
             angle=0.0,
@@ -315,7 +378,7 @@ class RocketLander(gym.Env):
 
         self.lander.color1 = rgb(230, 230, 230)
 
-        leg_length_modified = compute_leg_length(LEG_LENGTH, self.level_number)
+        leg_length_modified = self.leg_length
         for i in [-1, +1]:
             leg = self.world.CreateDynamicBody(
                 position=(initial_x - i * LEG_AWAY, initial_y + ROCKET_WIDTH * 0.2),
@@ -369,27 +432,11 @@ class RocketLander(gym.Env):
 
             self.legs.append(leg)
 
-        def random_factor_velocity(INITIAL_RANDOM, level):
-            if level > 1:
-                return INITIAL_RANDOM + 0.2
-            else:
-                return INITIAL_RANDOM
-
-        random_velocity_factor = random_factor_velocity(
-            INITIAL_RANDOM, self.level_number
-        )
-
         self.lander.linearVelocity = (
-            -self.np_random.uniform(0, random_velocity_factor)
-            * START_SPEED
-            * (initial_x - W / 2)
-            / W,
-            -START_SPEED,
+            self.np_random.uniform(-1, 1) * cfg["start_drift"] * cfg["start_speed"],
+            -float(cfg["start_speed"]),
         )
-
-        self.lander.angularVelocity = (
-            1 + random_velocity_factor
-        ) * self.np_random.uniform(-1, 1)
+        self.lander.angularVelocity = cfg["start_spin"] * self.np_random.uniform(-1, 1)
 
         self.drawlist = (
             self.legs + [self.water] + [self.ship] + self.containers + [self.lander]
@@ -405,62 +452,75 @@ class RocketLander(gym.Env):
         self.force_dir = 0
 
         if self.continuous:
-            action = np.clip(np.asarray(action, dtype=np.float64), -1, 1)
-            self.gimbal += action[0] * 0.15 / FPS
-            self.throttle += action[1] * 0.5 / FPS
+            # plain floats: numpy calls on 3 scalars are the main cost of a step
+            action = [min(1.0, max(-1.0, float(a))) for a in action]
+            if self.config["control"] == "direct":
+                # action = setpoint: gimbal angle, throttle (<= 0: engine off). The
+                # actuators follow it at a limited speed.
+                g_target = action[0] * GIMBAL_THRESHOLD
+                t_target = max(0.0, action[1])
+                self.gimbal += min(GIMBAL_SLEW, max(-GIMBAL_SLEW, g_target - self.gimbal))
+                self.throttle += min(THROTTLE_SLEW, max(-THROTTLE_SLEW, t_target - self.throttle))
+            else:
+                # action = rate of change of gimbal / throttle
+                self.gimbal += action[0] * 0.15 / FPS
+                self.throttle += action[1] * 0.5 / FPS
             if action[2] > 0.5:
                 self.force_dir = 1
             elif action[2] < -0.5:
                 self.force_dir = -1
         else:
             if action == 0:
-                self.gimbal += 0.01
+                self.gimbal += 0.05
             elif action == 1:
-                self.gimbal -= 0.01
+                self.gimbal -= 0.05
             elif action == 2:
-                self.throttle += 0.01
+                self.throttle += 0.1
             elif action == 3:
-                self.throttle -= 0.01
+                self.throttle -= 0.1
             elif action == 4:  # left
                 self.force_dir = -1
             elif action == 5:  # right
                 self.force_dir = 1
 
-        self.gimbal = np.clip(self.gimbal, -GIMBAL_THRESHOLD, GIMBAL_THRESHOLD)
-        self.throttle = np.clip(self.throttle, 0.0, 1.0)
+        self.gimbal = min(GIMBAL_THRESHOLD, max(-GIMBAL_THRESHOLD, float(self.gimbal)))
+        self.throttle = min(1.0, max(0.0, float(self.throttle)))
         self.power = (
             0
-            if self.throttle == 0.0
+            if self.throttle == 0.0 or self.total_fuel <= 0
             else MIN_THROTTLE + self.throttle * (1 - MIN_THROTTLE)
         )
 
         # main engine force
         force_pos = (self.lander.position[0], self.lander.position[1])
         force = (
-            -np.sin(self.lander.angle + self.gimbal) * MAIN_ENGINE_POWER * self.power,
-            np.cos(self.lander.angle + self.gimbal) * MAIN_ENGINE_POWER * self.power,
+            -math.sin(self.lander.angle + self.gimbal) * MAIN_ENGINE_POWER * self.power,
+            math.cos(self.lander.angle + self.gimbal) * MAIN_ENGINE_POWER * self.power,
         )
         self.lander.ApplyForce(force=force, point=force_pos, wake=False)
 
         # control thruster force
-        force_pos_c = self.lander.position + THRUSTER_HEIGHT * np.array(
-            (np.sin(self.lander.angle), np.cos(self.lander.angle))
+        lx, ly = self.lander.position
+        force_pos_c = (
+            lx + THRUSTER_HEIGHT * math.sin(self.lander.angle),
+            ly + THRUSTER_HEIGHT * math.cos(self.lander.angle),
         )
         force_c = (
-            -self.force_dir * np.cos(self.lander.angle) * SIDE_ENGINE_POWER,
-            self.force_dir * np.sin(self.lander.angle) * SIDE_ENGINE_POWER,
+            -self.force_dir * math.cos(self.lander.angle) * SIDE_ENGINE_POWER,
+            self.force_dir * math.sin(self.lander.angle) * SIDE_ENGINE_POWER,
         )
         self.lander.ApplyLinearImpulse(impulse=force_c, point=force_pos_c, wake=False)
 
         self.world.Step(1.0 / FPS, 60, 60)
 
         pos = self.lander.position
-        vel_l = np.array(self.lander.linearVelocity) / START_SPEED
+        vx, vy = self.lander.linearVelocity
+        vel_l = (vx / START_SPEED, vy / START_SPEED)
         vel_a = self.lander.angularVelocity
         x_distance = (pos.x - W / 2) / W
         y_distance = (pos.y - self.shipheight) / (H - self.shipheight)
 
-        angle = (self.lander.angle / np.pi) % 2
+        angle = (self.lander.angle / math.pi) % 2
         if angle > 1:
             angle -= 2
 
@@ -478,77 +538,116 @@ class RocketLander(gym.Env):
         self.state = state
         # REWARD -------------------------------------------------------------------------------------------------------
         # state variables for reward
-        distance = np.linalg.norm(
-            (3 * x_distance, y_distance)
-        )  # weight x position more
-        speed = np.linalg.norm(vel_l)
+        distance = math.hypot(3 * x_distance, y_distance)  # weight x position more
+        speed = math.hypot(*vel_l)
         groundcontact = self.legs[0].ground_contact or self.legs[1].ground_contact
-        y_abs_speed = vel_l[1] * np.sin(self.lander.angle)
+        cfg = self.config
+        self.total_rotation += self.lander.angularVelocity / FPS / (2 * np.pi)
         brokenleg = False
-        brokenleg = (
-            self.legs[0].joint.angle < 0 or self.legs[1].joint.angle > -0
-        ) and groundcontact
-        # if groundcontact and abs(y_abs_speed) > self.speed_threshold:
-        #     brokenleg = True
+        if cfg["hard_landing_breaks"] and groundcontact:
+            # hard landing: leg joints pushed past their limits
+            brokenleg = self.legs[0].joint.angle < 0 or self.legs[1].joint.angle > 0
+        if cfg["max_touchdown_speed"] is not None and groundcontact:
+            # touchdown too fast
+            brokenleg = brokenleg or abs(self.lander.linearVelocity[1]) > cfg["max_touchdown_speed"]
+        if groundcontact:
+            self.touch_down = True
         outside = abs(pos.x - W / 2) > W / 2 or pos.y > H
+        self.total_fuel = max(0.0, self.total_fuel - self.power)
         fuelcost = 0.1 * (0 * self.power + abs(self.force_dir)) / FPS
         self.landed = (
             self.legs[0].ground_contact
             and self.legs[1].ground_contact
-            and speed < self.speed_threshold
+            and speed < LANDED_SPEED
         )
         done = False
         self.done = False
-
-        reward = -fuelcost
+        success = False
+        timeout = False
 
         if outside or brokenleg:
             self.game_over = True
 
+        R = self.reward_params
+        reward = -fuelcost
+
         if self.game_over:
             done = True
-            self.done = True
         else:
-            # reward shaping
-            shaping = (
-                -0.5
-                * abs(distance / 1000)
-                * (distance + speed + (-y_abs_speed) + abs(angle))
-            )
+            # Potential-based shaping: each step pays the improvement of
+            # (distance to the ship + speed + tilt), so getting closer and slowing
+            # down are rewarded along the way without changing the best policy.
+            shaping = -R["shaping"] * (distance + speed + abs(angle))
             shaping += 0.1 * (self.legs[0].ground_contact + self.legs[1].ground_contact)
             if self.prev_shaping is not None:
                 reward += shaping - self.prev_shaping
             self.prev_shaping = shaping
-            # Leg contact is already rewarded through the shaping term above (once, on
-            # touchdown). A per-step contact bonus would let the agent farm reward by
-            # resting on the ship instead of finishing the landing.
+
             if self.landed:
                 self.landed_ticks += 1
             else:
                 self.landed_ticks = 0
             if self.landed_ticks == FPS:
-                reward = 1.0
+                success = True
                 self.good_landings += 1
+                done = cfg["end_on_landing"]
+            if not done and self.stepnumber + 1 >= cfg["max_steps"]:
+                # running out of time is a failure, otherwise hovering is a safe bet
+                timeout = True
                 done = True
-                self.done = True
 
-        # Small bonus for flying above the ship. Kept below the per-step time penalty
-        # (0.25 / FPS) so hovering forever never beats landing.
-        if not self.game_over and abs(pos.x - W / 2) < 0.90 * (SHIP_WIDTH / 2):
-            reward += 0.1 / FPS
-        if done:
-            reward += max(-1, 0 - 2 * (speed + distance + abs(angle) + abs(vel_a)))
-        elif not groundcontact:
-            reward -= 0.25 / FPS
-
-        reward = np.clip(reward, -1, 1)
+        if not groundcontact:
+            reward -= R["time"]
+        if success:
+            # up to +success, and up to +center more for landing on the ship's center
+            reward += R["success"] + R["center"] * (1 - min(1.0, abs(pos.x - W / 2) / (self.ship_width / 2)))
+        elif self.game_over:
+            reward -= R["crash"]
+        elif timeout:
+            reward -= R["timeout"]
+        self.done = done
 
         # REWARD -------------------------------------------------------------------------------------------------------
 
         self.stepnumber += 1
 
-        state = (state - MEAN[: len(state)]) / VAR[: len(state)]
-        return np.array(state, dtype=np.float32), float(reward), done, {}
+        # Everything a custom reward function may need, in physical-ish units
+        # (same scale as `self.state`, i.e. before observation standardization).
+        info = {
+            "x": state[0],  # -1 (left edge) .. 1 (right edge), 0 = ship center
+            "y": state[1],  # -1 = ship deck .. ~1 = start height
+            "angle": angle,  # in units of pi, 0 = upright
+            "left_leg_contact": bool(self.legs[0].ground_contact),
+            "right_leg_contact": bool(self.legs[1].ground_contact),
+            "throttle": self.throttle,  # 0..1
+            "gimbal": self.gimbal / GIMBAL_THRESHOLD,  # -1..1
+            "velocity_x": float(vel_l[0]),  # in units of START_SPEED
+            "velocity_y": float(vel_l[1]),  # negative = falling
+            "angular_velocity": float(vel_a),
+            "distance": float(distance),  # to the ship center, x weighted x3
+            "speed": float(speed),
+            "power": float(self.power),
+            "side_thruster": self.force_dir,  # -1, 0, 1
+            "fuel": self.total_fuel / max(1e-9, float(cfg["fuel"])),  # 1 = full tank
+            "x_on_ship": float((pos.x - W / 2) / (self.ship_width / 2)),  # -1 / +1 = ship edges
+            "x_meters": float(pos.x - W / 2),
+            "altitude": float(pos.y - self.shipheight),  # m above the deck (body base)
+            "rotation": float(self.total_rotation),  # turns since the start, + = counter-clockwise
+            "touch_down": self.touch_down,  # a leg has touched the ship this episode
+            "landed": bool(self.landed),  # both legs on the ship, slow
+            "landed_ticks": self.landed_ticks,
+            "landed_full": self.landed_ticks >= FPS,  # success: landed for 1 s
+            "game_over": bool(self.game_over),
+            "timeout": timeout,  # did not land within max_steps
+            "outside": bool(outside),
+            "broken_leg": bool(brokenleg),
+            "step": self.stepnumber,
+        }
+
+        self.info = info
+
+        state = (np.array(state) - MEAN[: len(state)]) / VAR[: len(state)]
+        return state.astype(np.float32), float(reward), done, info
 
     def render(self, mode="human", close=False):
         if close:
@@ -561,7 +660,9 @@ class RocketLander(gym.Env):
 
         if self.viewer is None:
 
-            self.viewer = rendering.Viewer(VIEWPORT_W, VIEWPORT_H)
+            self.viewer = rendering.Viewer(
+                VIEWPORT_W, VIEWPORT_H, visible=(mode == "human")
+            )
 
             self.viewer.set_bounds(0, W, 0, H)
 
@@ -680,7 +781,7 @@ class RocketLander(gym.Env):
                 self.lander.fixtures[0].body.transform
                 * (l[1] * ROCKET_WIDTH / 2, ROCKET_HEIGHT / 8),
                 l[0].fixtures[0].body.transform
-                * (l[1] * compute_leg_length(LEG_LENGTH, self.level_number) * 0.8, 0),
+                * (l[1] * self.leg_length * 0.8, 0),
             ]
             self.viewer.draw_polyline(
                 path, color=self.ship.color1, linewidth=1 if START_HEIGHT > 500 else 2

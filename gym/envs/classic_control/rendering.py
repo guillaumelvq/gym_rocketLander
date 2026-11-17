@@ -52,12 +52,14 @@ def get_display(spec):
         raise error.Error('Invalid display specification: {}. (Must be a string like :0 or None.)'.format(spec))
 
 class Viewer(object):
-    def __init__(self, width, height, display=None):
+    def __init__(self, width, height, display=None, visible=True):
         display = get_display(display)
 
         self.width = width
         self.height = height
-        self.window = pyglet.window.Window(width=width, height=height, display=display)
+        self.window = pyglet.window.Window(
+            width=width, height=height, display=display, visible=visible
+        )
         self.window.on_close = self.window_closed_by_user
         self.isopen = True
         self.geoms = []
@@ -94,6 +96,8 @@ class Viewer(object):
         self.window.clear()
         self.window.switch_to()
         self.window.dispatch_events()
+        # An invisible window never receives on_resize, so set viewport + projection here.
+        pyglet.window.Window.on_resize(self.window, self.width, self.height)
         self.transform.enable()
         for geom in self.geoms:
             geom.render()
