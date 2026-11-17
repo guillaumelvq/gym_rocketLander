@@ -36,14 +36,29 @@
       <section class="panel">
         <div class="panel-head">
           <h2>Scénario</h2>
-          <button id="reset-level" class="ghost small" title="Remettre les valeurs du niveau">Réinitialiser</button>
+          <span id="preset-label" class="scenario-label"></span>
         </div>
-        <label class="field">
-          <span>Niveau de difficulté</span>
-          <select id="level"></select>
-        </label>
-        <p id="level-desc" class="hint"></p>
-        <div id="config-fields" class="fields"></div>
+        <div id="preset-buttons" class="segmented" role="group" aria-label="Difficulté"></div>
+        <p id="preset-desc" class="hint"></p>
+        <div id="scenario-chips" class="chips"></div>
+
+        <h3 class="sub">Règles</h3>
+        <div id="rule-fields" class="rules"></div>
+
+        <details>
+          <summary>Réglages fins</summary>
+          <div id="config-fields" class="fields"></div>
+        </details>
+        <details>
+          <summary>Niveaux avancés (0 à 20)</summary>
+          <label class="field" style="margin-top:8px">
+            <span>Niveau</span>
+            <select id="level"></select>
+          </label>
+          <p id="level-desc" class="hint"></p>
+          <p id="level-help" class="hint"></p>
+        </details>
+        <button id="reset-level" class="ghost small reset" title="Revenir aux valeurs du préréglage, du niveau ou du défi choisi">Annuler mes modifications</button>
       </section>
 
       <section class="panel">

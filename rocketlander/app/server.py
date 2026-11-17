@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 import gym.envs.box2d.rocket_lander as RL
 from rocketlander.autopilot import Autopilot
 from rocketlander.challenges import CHALLENGES, CodeReward, compile_reward
+from rocketlander.presets import AUTOPILOT_SUCCESS, LEVEL_HELP, PRESETS, level_summary
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "runs"
@@ -75,6 +76,9 @@ def meta() -> dict:
     return {
         "default_config": RL.DEFAULT_CONFIG,
         "levels": {i: RL.level_config(i) for i in range(21)},
+        "level_summaries": {i: level_summary(i) for i in range(21)},
+        "level_help": LEVEL_HELP,
+        "presets": {name: {**p, "autopilot_success": AUTOPILOT_SUCCESS.get(name)} for name, p in PRESETS.items()},
         "config_doc": CONFIG_DOC,
         "reward_defaults": RL.REWARD,
         "reward_doc": REWARD_DOC,
@@ -171,6 +175,7 @@ class TrainRequest(BaseModel):
     algo: str = "PPO"
     gamma: float = 0.999
     n_envs: int = 16
+    preset: Optional[str] = None  # scenario label shown in the page (metadata only)
 
 
 @app.post("/api/train")
@@ -197,6 +202,8 @@ def start_training(req: TrainRequest) -> dict:
            "--no-progress-bar"]
     if not req.continuous:
         cmd.append("--discrete")
+    if req.preset:
+        cmd += ["--preset", req.preset[:60]]
     if req.reward_code:
         (out / "reward.py").write_text(req.reward_code, encoding="utf8")
         cmd += ["--reward-code", str(out / "reward.py")]
