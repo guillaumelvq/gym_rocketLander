@@ -57,6 +57,7 @@ REWARD_DOC = {
     "success": ("Bonus atterrissage", 0.0, 50.0, 1.0),
     "center": ("Bonus centre", 0.0, 20.0, 0.5),
     "crash": ("Pénalité crash", 0.0, 50.0, 1.0),
+    "crash_speed": ("Pénalité crash × vitesse d'impact", 0.0, 30.0, 0.5),
     "timeout": ("Pénalité temps écoulé", 0.0, 50.0, 1.0),
 }
 

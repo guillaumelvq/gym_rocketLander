@@ -69,6 +69,8 @@ REWARD = {
     "success": 10.0,  # landed and stayed 1 s on the ship
     "center": 5.0,    # extra, full when landing on the ship's center
     "crash": 5.0,     # hull touched, broken leg, left the screen
+    "crash_speed": 10.0,  # extra crash penalty per unit of speed (x40 m/s) at impact:
+                          # crashing slower is less bad, which teaches braking
     "timeout": 5.0,   # still flying after MAX_STEPS
 }
 
@@ -602,7 +604,7 @@ class RocketLander(gym.Env):
             # up to +success, and up to +center more for landing on the ship's center
             reward += R["success"] + R["center"] * (1 - min(1.0, abs(pos.x - W / 2) / (self.ship_width / 2)))
         elif self.game_over:
-            reward -= R["crash"]
+            reward -= R["crash"] + R["crash_speed"] * min(speed, 2.5)
         elif timeout:
             reward -= R["timeout"]
         self.done = done
