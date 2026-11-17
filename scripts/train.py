@@ -75,9 +75,16 @@ def main():
         env = VecNormalize(env, norm_obs=False, norm_reward=True, gamma=args.gamma)
         # EvalCallback requires the same wrapper on the eval env (here a no-op)
         eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False, training=False)
-    # PPO hyperparameters from RL Zoo (LunarLanderContinuous), a very similar task
-    kwargs = dict(n_steps=1024, batch_size=64, n_epochs=4, gamma=args.gamma, gae_lambda=0.98,
-                  ent_coef=0.01, learning_rate=3e-4) if args.algo == "PPO" else dict(gamma=args.gamma)
+    # Hyperparameters from RL Zoo (LunarLanderContinuous), a very similar task
+    if args.algo == "PPO":
+        kwargs = dict(n_steps=1024, batch_size=64, n_epochs=4, gamma=args.gamma, gae_lambda=0.98,
+                      ent_coef=0.01, learning_rate=3e-4)
+    elif args.algo == "SAC":
+        kwargs = dict(batch_size=256, learning_rate=7.3e-4, buffer_size=300_000, gamma=args.gamma,
+                      tau=0.01, learning_starts=10_000, train_freq=1, gradient_steps=1,
+                      policy_kwargs=dict(net_arch=[256, 256]))
+    else:
+        kwargs = dict(gamma=args.gamma)
     model = ALGOS[args.algo]("MlpPolicy", env, seed=args.seed, verbose=0,
                              tensorboard_log=str(Path("runs")), **kwargs)
     model.learn(

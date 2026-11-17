@@ -54,6 +54,7 @@ CONFIG_DOC = {
 REWARD_DOC = {
     "shaping": ("Guidage (distance + vitesse + inclinaison)", 0.0, 5.0, 0.1),
     "time": ("Pénalité par instant en vol", 0.0, 0.05, 0.001),
+    "descent": ("Pénalité chute trop rapide près du sol", 0.0, 2.0, 0.05),
     "success": ("Bonus atterrissage", 0.0, 50.0, 1.0),
     "center": ("Bonus centre", 0.0, 20.0, 0.5),
     "crash": ("Pénalité crash", 0.0, 50.0, 1.0),

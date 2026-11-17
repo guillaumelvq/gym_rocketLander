@@ -8,14 +8,14 @@ from typing import Optional
 
 import numpy as np
 import torch
-from stable_baselines3 import A2C, PPO
+from stable_baselines3 import A2C, PPO, SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from rocketlander.env import RewardFn, make_env
 
-ALGOS = {"PPO": PPO, "A2C": A2C}
+ALGOS = {"PPO": PPO, "A2C": A2C, "SAC": SAC}
 
 # Small MLP policies on CPU: extra torch threads only add contention (measured ~1.6x
 # slower with the default thread count). Envs are stepped in-process for the same reason.
