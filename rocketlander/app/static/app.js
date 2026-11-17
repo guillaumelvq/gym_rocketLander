@@ -37,12 +37,7 @@ const S_KEYS = {
   memory: "dict libre, vidé à chaque épisode",
 };
 
-const LEVEL_DESC = (lvl) => {
-  if (lvl === 0) return "Les pieds ne cassent jamais : même un crash à pleine vitesse sur le bateau compte.";
-  if (lvl < 10) return `Les pieds cassent au-delà de ${(8 - 0.4 * lvl).toFixed(1)} m/s au contact. Départ un peu aléatoire.`;
-  if (lvl === 10) return "4,4 m/s max au contact, et les jambes cassent si elles sont trop comprimées.";
-  return `Comme le niveau 10, avec des jambes raccourcies (×${Math.max(0.3, 1 - 0.07 * (lvl - 10)).toFixed(2)}).`;
-};
+const LEVEL_DESC = (lvl) => META?.level_summaries?.[lvl] ?? "";
 
 let META = null;
 let RUNS = [];
@@ -52,6 +47,8 @@ const state = {
   reward: {},
   code: "",
   challenge: "landing",
+  // what the scenario was built from: {kind: "preset", name} | {kind: "level", level} | {kind: "challenge", id}
+  base: { kind: "preset", name: "facile" },
 };
 
 // ===================================================================== sidebar
@@ -94,25 +91,200 @@ function checkField(container, key, label, help, value, onChange) {
   return { wrap, set: (v) => { input.checked = !!v; } };
 }
 
+// ---------------------------------------------------------- scenario: presets, rules, fine settings
+
+const sameValue = (a, b) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-9 : a === b);
+const sameConfig = (a, b) => Object.keys(META.default_config).every((k) => sameValue(a[k], b[k]));
+const H_METERS = 385;
+
+// Rules shown as checkboxes / lists. Each maps to one or two config keys.
+const RULES = [
+  { id: "fragile", label: "Pieds fragiles", help: "les pieds cassent si la vitesse verticale au contact dépasse la limite",
+    options: [[8, "8 m/s"], [6, "6 m/s"], [5, "5 m/s"], [4.4, "4,4 m/s"], [3, "3 m/s"]] },
+  { id: "hard_landing_breaks", label: "Jambes cassent si trop comprimées", check: true },
+  { id: "end_on_landing", label: "Fin de l'épisode à l'atterrissage", check: true },
+  { id: "ship_width", label: "Zone d'atterrissage",
+    options: [[2.0, "Très large"], [1.5, "Large"], [1.2, "Assez large"], [1.0, "Normale"], [0.8, "Réduite"], [0.6, "Étroite"], [0.4, "Très étroite"]], ratio: true },
+  { id: "start", label: "Point de départ",
+    options: [["center", "Au-dessus du bateau"], ["left", "Décalé à gauche"], ["right", "Décalé à droite"], ["random", "Aléatoire"]] },
+  { id: "start_height", label: "Hauteur de départ",
+    options: [[0.35, `Basse (~${Math.round(0.35 * H_METERS)} m)`], [0.6, `Moyenne (~${Math.round(0.6 * H_METERS)} m)`], [0.95, `Haute (~${Math.round(0.95 * H_METERS)} m)`]] },
+  { id: "start_speed", label: "Vitesse initiale",
+    options: [[10, "Lente (10 m/s)"], [25, "Normale (25 m/s)"], [40, "Rapide (40 m/s)"]] },
+  { id: "start_spin", label: "Rotation initiale aléatoire", toggle: 1.0 },
+  { id: "start_drift", label: "Dérive horizontale", toggle: 0.2 },
+  { id: "leg_scale", label: "Jambes",
+    options: [[1.2, "Longues"], [1.0, "Normales"], [0.8, "Courtes"], [0.6, "Très courtes"]], ratio: true },
+  { id: "fuel", label: "Carburant",
+    options: [[1500, "Abondant (1500)"], [1000, "Généreux (1000)"], [900, "Large (900)"], [800, "Confortable (800)"],
+              [700, "Normal (700)"], [600, "Réduit (600)"], [500, "Limité (500)"], [300, "Très limité (300)"]] },
+];
+
+const START_MODES = {
+  center: { start_x: 0.0, start_x_spread: 0.03 },
+  left: { start_x: -0.25, start_x_spread: 0.02 },
+  right: { start_x: 0.25, start_x_spread: 0.02 },
+  random: { start_x: 0.0, start_x_spread: 0.15 },
+};
+const startMode = (c) => (c.start_x_spread >= 0.1 ? "random" : c.start_x < -0.1 ? "left" : c.start_x > 0.1 ? "right" : "center");
+const nearest = (v, options) => options.reduce((a, b) => (Math.abs(b[0] - v) < Math.abs(a[0] - v) ? b : a))[0];
+
+function selectHtml(options) { return `<select>${options.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select>`; }
+
+// show the exact value even when it is not one of the proposed choices
+function setSelectValue(sel, value, label) {
+  for (const o of [...sel.querySelectorAll("option.custom")]) sel.removeChild(o);
+  const match = [...sel.options].find((o) => sameValue(Number(o.value), Number(value)));
+  if (match) { sel.value = match.value; return; }
+  const opt = new Option(label, value);
+  opt.className = "custom";
+  sel.add(opt);
+  sel.value = opt.value;
+}
+
+const ruleControls = [];
+function buildRules() {
+  const box = $("#rule-fields");
+  box.innerHTML = "";
+  ruleControls.length = 0;
+  for (const rule of RULES) {
+    const row = document.createElement("div");
+    row.className = "rule";
+    row.title = rule.help || "";
+    let refresh;
+    if (rule.id === "fragile") {
+      row.innerHTML = `<label class="check"><input type="checkbox"> ${rule.label}</label>${selectHtml(rule.options)}`;
+      const cb = $("input", row), sel = $("select", row);
+      cb.addEventListener("change", () => setConfig({ max_touchdown_speed: cb.checked ? Number(sel.value) : null }));
+      sel.addEventListener("change", () => setConfig({ max_touchdown_speed: Number(sel.value) }));
+      refresh = () => {
+        const v = state.config.max_touchdown_speed;
+        cb.checked = v != null; sel.disabled = v == null;
+        if (v != null) setSelectValue(sel, v, `${String(v).replace(".", ",")} m/s`);
+      };
+    } else if (rule.check || rule.toggle) {
+      row.innerHTML = `<label class="check"><input type="checkbox"> ${rule.label}</label>`;
+      const cb = $("input", row);
+      cb.addEventListener("change", () => setConfig({ [rule.id]: rule.check ? cb.checked : (cb.checked ? rule.toggle : 0) }));
+      refresh = () => { cb.checked = rule.check ? !!state.config[rule.id] : state.config[rule.id] > 0; };
+    } else if (rule.id === "start") {
+      row.innerHTML = `<span>${rule.label}</span>${selectHtml(rule.options)}`;
+      const sel = $("select", row);
+      sel.addEventListener("change", () => setConfig(START_MODES[sel.value]));
+      refresh = () => { sel.value = startMode(state.config); };
+    } else {
+      row.innerHTML = `<span>${rule.label}</span>${selectHtml(rule.options)}`;
+      const sel = $("select", row);
+      sel.addEventListener("change", () => setConfig({ [rule.id]: Number(sel.value) }));
+      refresh = () => {
+        const v = state.config[rule.id];
+        const near = rule.options.find(([o]) => o === nearest(v, rule.options))[1];
+        setSelectValue(sel, v, rule.ratio ? `≈ ${near} (×${v})` : `${v}`);
+      };
+    }
+    box.appendChild(row);
+    ruleControls.push(refresh);
+  }
+}
+
 const configInputs = {};
 function buildConfigFields() {
   const box = $("#config-fields");
   box.innerHTML = "";
   for (const [key, [label, min, max, step, help]] of Object.entries(META.config_doc)) {
-    const onChange = (v) => { state.config[key] = v; markChanged(); saveState(); };
+    const onChange = (v) => setConfig({ [key]: v }, { fromSlider: true });
     configInputs[key] = min == null
       ? checkField(box, key, label, help, state.config[key], onChange)
       : rangeField(box, key, label, min, max, step, help, state.config[key], onChange,
                    { nullable: key === "max_touchdown_speed" });
   }
-  markChanged();
 }
 
-function markChanged() {
-  const base = META.levels[state.level];
-  for (const [key, input] of Object.entries(configInputs)) {
-    input.wrap.classList.toggle("changed", JSON.stringify(base[key]) !== JSON.stringify(state.config[key]));
+function setConfig(patch, { fromSlider = false } = {}) {
+  Object.assign(state.config, patch);
+  refreshScenario({ skipSliders: fromSlider });
+  saveState();
+}
+
+// configuration the current scenario started from (used for the "modified" marks)
+function baseConfig() {
+  const b = state.base || {};
+  if (b.kind === "preset" && META.presets[b.name]) return META.presets[b.name].config;
+  if (b.kind === "challenge" && META.challenges[b.id]) {
+    const ch = META.challenges[b.id];
+    return { ...META.levels[ch.level], ...ch.config };
   }
+  return META.levels[b.level ?? state.level];
+}
+
+function matchingPreset() {
+  return Object.keys(META.presets).find((name) => sameConfig(state.config, META.presets[name].config)) || null;
+}
+
+function scenarioLabel() {
+  const p = matchingPreset();
+  if (p) return META.presets[p].title;
+  if (sameConfig(state.config, META.levels[state.level])) return `Niveau ${state.level}`;
+  const b = state.base || {};
+  if (b.kind === "challenge" && sameConfig(state.config, baseConfig())) return `Défi « ${META.challenges[b.id].title} »`;
+  return "Personnalisé";
+}
+
+function describeConfig(c) {
+  const chips = [];
+  chips.push(c.max_touchdown_speed == null ? "pieds incassables" : `contact ≤ ${String(c.max_touchdown_speed).replace(".", ",")} m/s`);
+  if (c.hard_landing_breaks) chips.push("jambes fragiles");
+  chips.push(`départ ${Math.round(c.start_height * H_METERS)} m à ${Math.round(c.start_speed)} m/s`);
+  const sm = startMode(c);
+  if (sm !== "center") chips.push({ left: "départ à gauche", right: "départ à droite", random: "départ aléatoire" }[sm]);
+  if (c.ship_width !== 1) chips.push(`zone ×${c.ship_width}`);
+  if (c.leg_scale !== 1) chips.push(`jambes ×${c.leg_scale}`);
+  if (c.start_spin > 0) chips.push("rotation initiale");
+  if (c.start_drift > 0) chips.push("dérive");
+  chips.push(`carburant ${Math.round(c.fuel)}`);
+  if (!c.end_on_landing) chips.push("ne s'arrête pas à l'atterrissage");
+  return chips;
+}
+
+function refreshScenario({ skipSliders = false } = {}) {
+  if (!skipSliders) for (const [k, input] of Object.entries(configInputs)) input.set(state.config[k]);
+  ruleControls.forEach((refresh) => refresh());
+  const base = baseConfig();
+  for (const [key, input] of Object.entries(configInputs)) {
+    input.wrap.classList.toggle("changed", !sameValue(base[key], state.config[key]));
+  }
+  const active = matchingPreset();
+  $$("#preset-buttons button").forEach((b) => b.classList.toggle("active", b.dataset.preset === active));
+  const label = scenarioLabel();
+  $("#preset-label").textContent = label;
+  const p = active && META.presets[active];
+  $("#preset-desc").innerHTML = p
+    ? `${p.description} <span class="ap">Autopilote : ${Math.round(p.autopilot_success * 100)} % de réussite</span>`
+    : label.startsWith("Niveau") ? LEVEL_DESC(state.level)
+    : label.startsWith("Défi") ? "Scénario prévu pour ce défi (départ facilité). Choisis un préréglage pour le durcir."
+    : "Réglages modifiés à la main.";
+  $("#scenario-chips").innerHTML = describeConfig(state.config).map((c) => `<span class="chip">${c}</span>`).join("");
+  $("#level").value = state.level;
+  $("#level-desc").textContent = LEVEL_DESC(state.level);
+}
+
+function buildPresetButtons() {
+  const box = $("#preset-buttons");
+  box.innerHTML = "";
+  for (const [name, p] of Object.entries(META.presets)) {
+    const b = document.createElement("button");
+    b.type = "button"; b.dataset.preset = name; b.textContent = p.title; b.title = p.description;
+    b.addEventListener("click", () => applyPreset(name));
+    box.appendChild(b);
+  }
+}
+
+function applyPreset(name) {
+  state.level = 0;
+  state.config = { ...META.presets[name].config };
+  state.base = { kind: "preset", name };
+  refreshScenario();
+  saveState();
 }
 
 const rewardInputs = {};
@@ -128,10 +300,8 @@ function buildRewardFields() {
 function applyLevel(level, keepOverrides = {}) {
   state.level = Number(level);
   state.config = { ...META.levels[state.level], ...keepOverrides };
-  $("#level").value = state.level;
-  $("#level-desc").textContent = LEVEL_DESC(state.level);
-  for (const [k, input] of Object.entries(configInputs)) input.set(state.config[k]);
-  markChanged();
+  state.base = { kind: "level", level: state.level };
+  refreshScenario();
   saveState();
 }
 
@@ -141,6 +311,8 @@ function applyChallenge(id) {
   $("#challenge").value = id;
   $("#challenge-goal").textContent = ch.goal;
   applyLevel(ch.level, ch.config);
+  state.base = { kind: "challenge", id };
+  refreshScenario();
   state.code = ch.code;
   $("#reward-code").value = ch.code;
   saveState();
@@ -156,7 +328,16 @@ function initSidebar() {
   const lvl = $("#level");
   for (let i = 0; i <= 20; i++) lvl.add(new Option(`Niveau ${i}`, i));
   lvl.addEventListener("change", () => applyLevel(lvl.value));
-  $("#reset-level").addEventListener("click", () => applyLevel(state.level));
+  $("#level-help").textContent = META.level_help;
+  $("#reset-level").addEventListener("click", () => {
+    const b = state.base || {};
+    if (b.kind === "preset") applyPreset(b.name);
+    else if (b.kind === "challenge") { state.config = { ...baseConfig() }; refreshScenario(); saveState(); }
+    else applyLevel(b.level ?? state.level);
+  });
+  buildPresetButtons();
+  buildRules();
+  const qp = new URLSearchParams(location.search).get("preset");  // e.g. ?preset=difficile
 
   const sk = $("#s-keys");
   for (const [k, v] of Object.entries(S_KEYS)) sk.insertAdjacentHTML("beforeend", `<code>${k}</code><span>${v}</span>`);
@@ -178,14 +359,14 @@ function initSidebar() {
     state.config = { ...META.levels[state.level], ...saved.config };
     chSel.value = state.challenge;
     $("#challenge-goal").textContent = META.challenges[state.challenge].goal;
-    lvl.value = state.level;
-    $("#level-desc").textContent = LEVEL_DESC(state.level);
     code.value = state.code;
     buildConfigFields();
+    refreshScenario();
   } else {
     buildConfigFields();
     applyChallenge("landing");
   }
+  if (qp && META.presets[qp]) applyPreset(qp);
   buildRewardFields();
 }
 
@@ -675,7 +856,7 @@ function runCard(r) {
   pill.textContent = { running: "en cours", starting: "démarrage", done: "terminé", stopped: "arrêté", failed: "erreur" }[r.status] || r.status;
   const p = r.progress || {};
   const ch = r.custom_reward ? "reward perso" : "reward de base";
-  $(".run-meta", card).textContent = `${r.algo || "PPO"} · niveau ${r.level} · ${r.continuous === false ? "discret" : "continu"} · ${ch} · ${Math.round((p.timesteps || 0) / 1000)}k / ${Math.round((r.timesteps || 0) / 1000)}k pas`;
+  $(".run-meta", card).textContent = `${r.algo || "PPO"} · ${r.preset || `niveau ${r.level}`} · ${r.continuous === false ? "discret" : "continu"} · ${ch} · ${Math.round((p.timesteps || 0) / 1000)}k / ${Math.round((r.timesteps || 0) / 1000)}k pas`;
   $(".progress > div", card).style.width = `${Math.min(100, 100 * (p.timesteps || 0) / (r.timesteps || 1))}%`;
   const l = p.latest || {}, ev = r.eval;
   const stat = (v, label) => `<span class="stat"><b>${v}</b><small>${label}</small></span>`;
@@ -729,6 +910,8 @@ async function loadRunSettings(name) {
   const r = await (await fetch(`/api/runs/${name}`)).json();
   if (r.reward_code) { state.code = r.reward_code; $("#reward-code").value = r.reward_code; }
   applyLevel(r.level, r.config || {});
+  const p = matchingPreset();
+  if (p) { state.base = { kind: "preset", name: p }; refreshScenario(); saveState(); }
 }
 
 async function startTraining() {
@@ -737,7 +920,7 @@ async function startTraining() {
     name: $("#run-name").value || META.challenges[state.challenge]?.title || "run",
     level: state.level, continuous: $("#mode").value === "cont", algo: $("#algo").value,
     timesteps: Number($("#timesteps").value), gamma: Number($("#gamma").value),
-    config: diffFromLevel(), reward: state.reward, reward_code: state.code,
+    config: diffFromLevel(), reward: state.reward, reward_code: state.code, preset: scenarioLabel(),
   };
   $("#train").disabled = true;
   try {

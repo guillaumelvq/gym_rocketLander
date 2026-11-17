@@ -54,7 +54,7 @@ directement les arènes.
 | Zone | Rôle |
 |---|---|
 | **Défi** (à gauche) | Choisit un exercice. Il règle le scénario et charge une reward de départ. |
-| **Scénario** | Niveau de difficulté et réglages fins : largeur de la zone, position, hauteur et vitesse de départ, vitesse maximale au contact, longueur des jambes, fin à l'atterrissage, carburant… Un point orange signale une valeur modifiée par rapport au niveau. |
+| **Scénario** | Six préréglages de difficulté (Découverte → Cauchemar), puis des règles à cocher ou à choisir : pieds fragiles et limite de vitesse au contact, zone d'atterrissage, point, hauteur et vitesse de départ, jambes, carburant, fin à l'atterrissage… *Réglages fins* donne les valeurs exactes (un point orange signale une valeur modifiée) ; *Niveaux avancés* propose l'échelle numérique 0 à 20. |
 | **Reward** | Le code Python de ta reward, et les poids de la reward de base. |
 | **Onglet Arène** | Une ou plusieurs simulations en direct, chacune avec son pilote. |
 | **Onglet Entraînements** | Lancer un entraînement et suivre les courbes d'apprentissage. |
@@ -189,14 +189,37 @@ le moteur), propulseurs latéraux (< -0,5 à gauche, > 0,5 à droite). L'agent d
 4 frames (*frame skip*). En mode discret, il y a 7 actions : moteur ±, poussée ±, propulseur
 gauche ou droit, rien.
 
-**Niveaux** (préréglages du scénario, chaque niveau est au moins aussi dur que le précédent) :
+**Difficulté.** Dans l'application, le panneau *Scénario* propose six **préréglages**, puis des
+**règles** à cocher ou à choisir dans une liste. Un clic sur un préréglage règle tout ; modifier
+une règle fait passer le scénario en « Personnalisé ». Les préréglages sont définis dans
+`rocketlander/presets.py`. La dernière colonne donne la réussite de l'autopilote programmé
+sur 30 départs : chaque préréglage est faisable.
 
-| Niveau | Règles |
+| Préréglage | Départ | Vitesse max au contact | Jambes | Zone | Carburant | Autopilote |
+|---|---|---|---|---|---|---|
+| Découverte | 135 m, 10 m/s, au-dessus du bateau | 8 m/s | longues (×1,2) | ×1,5 | 1000 | 100 % |
+| Facile | 192 m, 15 m/s | 7 m/s | normales | ×1,2 | 900 | 100 % |
+| Moyen | 270 m, 25 m/s, légère dérive | 6 m/s | normales | ×1 | 800 | 100 % |
+| Difficile | 366 m, 40 m/s, dérive | 5 m/s | normales | ×0,8 | 700 | 97 % |
+| Expert | 366 m, 40 m/s, dérive | 5 m/s, et casse si trop comprimées | courtes (×0,8) | ×0,6 | 600 | 87 % |
+| Cauchemar | 366 m, 40 m/s, départ très décalé | 5 m/s, et casse si trop comprimées | très courtes (×0,6) | ×0,4 | 500 | 40 % |
+
+Les **règles** réglables : pieds fragiles et leur limite de vitesse (8, 6, 5, 4,4 ou 3 m/s),
+jambes qui cassent si elles sont trop comprimées, fin de l'épisode à l'atterrissage, zone
+d'atterrissage, point de départ (au-dessus, décalé à gauche, décalé à droite, aléatoire),
+hauteur et vitesse de départ, rotation initiale, dérive, longueur des jambes, carburant.
+*Réglages fins* donne accès aux valeurs exactes avec des curseurs.
+
+**Niveaux avancés (0 à 20).** C'est l'ancienne échelle numérique, gardée pour le notebook et
+la ligne de commande (`--level`). Le numéro règle tout d'un coup, depuis un départ à 366 m et
+40 m/s :
+
+| Niveau | Ce que le numéro change |
 |---|---|
 | 0 | Les pieds ne cassent jamais : même un contact à pleine vitesse « atterrit » |
-| 1 – 9 | Les pieds cassent au-delà d'une vitesse verticale au contact : 7,6 m/s au niveau 1, 0,4 m/s de moins par niveau (4,4 m/s au niveau 9). Départ de plus en plus aléatoire |
-| 10 | Même limite de 4,4 m/s, et les jambes cassent si elles sont trop comprimées |
-| 11 – 20 | Jambes de plus en plus courtes (×0,93 → ×0,3) |
+| 1 – 9 | Les pieds cassent si la vitesse verticale au contact dépasse 8 − 0,4 × niveau m/s (7,6 m/s au niveau 1, 4,4 m/s au niveau 9). Le départ devient plus aléatoire |
+| 10 | Même limite de 4,4 m/s, et les jambes cassent aussi si elles sont trop comprimées |
+| 11 – 20 | En plus, les jambes raccourcissent : ×0,93 au niveau 11, jusqu'à ×0,3 au niveau 20 |
 
 Pourquoi c'est dur : la fusée tombe à 40 m/s et le moteur à fond ne la freine que d'environ
 10 m/s². Il faut déclencher le freinage au bon moment, à quelques mètres près. L'autopilote

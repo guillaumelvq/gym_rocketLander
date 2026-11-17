@@ -37,6 +37,7 @@ def main():
     p.add_argument("--frame-skip", type=int, default=4)
     p.add_argument("--no-reward-norm", action="store_true", help="disable VecNormalize on rewards")
     p.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--preset", default=None, help="name of the scenario preset (metadata only)")
     p.add_argument("--config", default="{}", help='JSON scenario overrides, e.g. {"start_height": 0.5}')
     p.add_argument("--reward-code", default=None,
                    help="Python file defining reward(s, base_reward) (see rocketlander/challenges.py)")
@@ -59,7 +60,7 @@ def main():
     (out / "meta.json").write_text(json.dumps({
         "name": name, "algo": args.algo, "level": args.level, "continuous": continuous,
         "timesteps": int(args.timesteps), "reward": rp, "config": cfg, "seed": args.seed,
-        "custom_reward": bool(args.reward_code),
+        "custom_reward": bool(args.reward_code), "preset": args.preset,
         "gamma": args.gamma, "frame_skip": args.frame_skip, "reward_norm": not args.no_reward_norm,
         "created": datetime.now().isoformat(timespec="seconds"),
     }, indent=1), encoding="utf8")
