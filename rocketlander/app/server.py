@@ -29,8 +29,9 @@ from pydantic import BaseModel, Field
 
 import gym.envs.box2d.rocket_lander as RL
 from rocketlander.autopilot import Autopilot
-from rocketlander.challenges import CHALLENGES, CodeReward, compile_reward
+from rocketlander.challenges import CHALLENGES, CodeReward, compile_reward, judge
 from rocketlander.controls import KeyboardPilot
+from rocketlander.episode import EpisodeTracker
 from rocketlander.presets import AUTOPILOT_SUCCESS, LEVEL_HELP, PRESETS, level_summary
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -118,17 +119,41 @@ def _run_info(d: Path) -> dict:
         status = "failed"
     else:  # started outside the app (scripts/train.py) or app restarted
         status = "running" if progress and time.time() - (d / "progress.json").stat().st_mtime < 120 else "stopped"
+    timing = _timing(d, meta_, progress, status)
     return {
         **meta_,
         "name": d.name,
         "status": status,
         "has_best": (d / "best_model.zip").exists(),
         "has_last": (d / "last_model.zip").exists(),
+        "has_live": (d / "live_model.zip").exists(),
+        "live": _read_json(d / "live.json"),
+        **timing,
         "progress": progress,
         "eval": _read_json(d / "eval.json"),
         "reward_code": (d / "reward.py").read_text(encoding="utf8") if (d / "reward.py").exists() else None,
         "mtime": (d / "meta.json").stat().st_mtime if (d / "meta.json").exists() else d.stat().st_mtime,
     }
+
+
+def _timing(d: Path, meta_: dict, progress: dict, status: str) -> dict:
+    """Elapsed time and a rough ETA from the progress file."""
+    started = START_TIMES.get(d.name)
+    if started is None:
+        try:
+            started = time.mktime(time.strptime(meta_.get("created", ""), "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, OverflowError):
+            started = (d / "meta.json").stat().st_mtime if (d / "meta.json").exists() else None
+    if started is None:
+        return {"elapsed_s": None, "eta_s": None}
+    end = time.time() if status == "running" else (
+        (d / "progress.json").stat().st_mtime if (d / "progress.json").exists() else time.time())
+    elapsed = max(0.0, end - started)
+    done, total = progress.get("timesteps") or 0, progress.get("total_timesteps") or meta_.get("timesteps")
+    eta = None
+    if status == "running" and done > 0 and total:
+        eta = max(0.0, (total - done) * elapsed / done)
+    return {"elapsed_s": round(elapsed), "eta_s": None if eta is None else round(eta)}
 
 
 @app.get("/api/runs")
@@ -146,6 +171,13 @@ def list_runs() -> list[dict]:
 def get_run(name: str) -> dict:
     d = _run_dir(name)
     return _run_info(d)
+
+
+@app.get("/api/runs/{name}/episodes")
+def get_episodes(name: str) -> dict:
+    """Last training episodes (outcome, challenge verdict, trajectory) written by train.py."""
+    d = _run_dir(name)
+    return {"episodes": _read_json(d / "episodes.json") or [], "live": _read_json(d / "live.json")}
 
 
 @app.get("/api/runs/{name}/log")
@@ -168,6 +200,7 @@ def _run_dir(name: str) -> Path:
 MAX_PARALLEL = max(1, (os.cpu_count() or 2) - 2)
 TRAININGS: dict[str, subprocess.Popen] = {}
 STOPPED: set[str] = set()
+START_TIMES: dict[str, float] = {}
 
 
 class TrainRequest(BaseModel):
@@ -182,6 +215,18 @@ class TrainRequest(BaseModel):
     gamma: float = 0.999
     n_envs: int = 16
     preset: Optional[str] = None  # scenario label shown in the page (metadata only)
+    challenge: Optional[str] = None  # challenge used to judge the episodes (curves, verdicts)
+    init_run: Optional[str] = None  # start from this run's model instead of a blank agent
+    init_which: str = "best"  # which model of init_run: best | last | live
+
+
+def _model_path(d: Path, which: str = "best") -> Optional[Path]:
+    """Model file of a run: the requested one, else the best available."""
+    for w in (which, "best", "last", "live"):
+        p = d / f"{w}_model.zip"
+        if p.exists():
+            return p
+    return None
 
 
 @app.post("/api/train")
@@ -192,6 +237,18 @@ def start_training(req: TrainRequest) -> dict:
     unknown = set(req.config) - set(RL.DEFAULT_CONFIG)
     if unknown:
         raise HTTPException(400, f"paramètres inconnus : {sorted(unknown)}")
+    if req.challenge is not None and req.challenge not in CHALLENGES:
+        raise HTTPException(400, f"défi inconnu : {req.challenge!r}")
+    init_path = None
+    if req.init_run:
+        init_dir = _run_dir(req.init_run)
+        init_path = _model_path(init_dir, req.init_which)
+        if init_path is None:
+            raise HTTPException(400, f"le run {req.init_run!r} n'a pas de modèle sauvegardé")
+        init_meta = _read_json(init_dir / "meta.json") or {}
+        # same networks: the algorithm and the action space come from the starting agent
+        req.algo = init_meta.get("algo", req.algo)
+        req.continuous = init_meta.get("continuous", req.continuous)
     if req.reward_code:
         try:
             fn = compile_reward(req.reward_code)
@@ -210,13 +267,20 @@ def start_training(req: TrainRequest) -> dict:
         cmd.append("--discrete")
     if req.preset:
         cmd += ["--preset", req.preset[:60]]
+    if req.challenge:
+        cmd += ["--challenge", req.challenge]
+    if init_path is not None:
+        cmd += ["--init-model", str(init_path)]
+    # ~30 snapshots per training so the live view visibly evolves
+    cmd += ["--snapshot-every", str(max(4096, int(req.timesteps) // 30))]
     if req.reward_code:
         (out / "reward.py").write_text(req.reward_code, encoding="utf8")
         cmd += ["--reward-code", str(out / "reward.py")]
     log = open(out / "train.log", "w", encoding="utf8")
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     TRAININGS[name] = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
-    return {"name": name}
+    START_TIMES[name] = time.time()
+    return {"name": name, "init_model": None if init_path is None else init_path.name}
 
 
 @app.post("/api/runs/{name}/stop")
@@ -434,24 +498,39 @@ class ModelAgent(Agent):
     _cache: dict[tuple, Any] = {}
 
     def __init__(self, run: str, which: str):
-        from stable_baselines3 import A2C, PPO
+        from stable_baselines3 import A2C, PPO, SAC
 
         d = _run_dir(run)
         meta_ = _read_json(d / "meta.json") or {}
-        path = d / f"{which}_model.zip"
-        if not path.exists():
-            path = d / "last_model.zip" if (d / "last_model.zip").exists() else d / "best_model.zip"
-        if not path.exists():
-            raise HTTPException(404, "ce run n'a pas encore de modèle sauvegardé")
+        if which == "live":
+            # the latest snapshot of a training: reloaded whenever the file changes
+            path = d / "live_model.zip"
+            if not path.exists():
+                raise HTTPException(404, "pas encore d'instantané : l'agent n'a pas fini son premier cycle")
+        else:
+            path = _model_path(d, which)
+            if path is None:
+                raise HTTPException(404, "ce run n'a pas encore de modèle sauvegardé")
         key = (str(path), path.stat().st_mtime)
         if key not in self._cache:
-            cls = A2C if meta_.get("algo") == "A2C" else PPO
-            self._cache[key] = cls.load(path, device="cpu")
+            cls = {"A2C": A2C, "SAC": SAC}.get(meta_.get("algo"), PPO)
+            for attempt in range(5):  # the training may be rewriting the file right now
+                try:
+                    self._cache[key] = cls.load(path, device="cpu")
+                    break
+                except (OSError, ValueError, EOFError, KeyError):
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.2)
+            # keep the cache small: live snapshots change every few seconds
+            for k in [k for k in self._cache if k[0] == str(path) and k != key]:
+                del self._cache[k]
         self.model = self._cache[key]
         self.meta = meta_
         self.continuous = meta_.get("continuous", True)
         self.frame_skip = int(meta_.get("frame_skip", 4))
         self.reward_code = (d / "reward.py").read_text(encoding="utf8") if (d / "reward.py").exists() else None
+        self.snapshot = _read_json(d / "live.json") if which == "live" else None
 
     def act(self, env, obs):
         action, _ = self.model.predict(obs, deterministic=True)
@@ -545,8 +624,10 @@ async def simulate(ws: WebSocket) -> None:
                 seed, level = int(attempt["seed"]), int(attempt["level"])
                 config = attempt["config"]
                 reward_params = attempt.get("reward_params") or {}
-            elif agent_kind == "model":
-                agent: Agent = ModelAgent(msg["run"], msg.get("which", "best"))
+            elif agent_kind in ("model", "live"):
+                # loading a model takes a moment: off the event loop, other pages stay responsive
+                agent: Agent = await asyncio.to_thread(
+                    ModelAgent, msg["run"], "live" if agent_kind == "live" else msg.get("which", "best"))
                 # a model is shown in the scenario it was trained on, unless the page overrides it
                 if not msg.get("override_scenario"):
                     level = int(agent.meta.get("level", level))
@@ -559,7 +640,7 @@ async def simulate(ws: WebSocket) -> None:
             else:
                 agent = None  # autopilot needs the env
             env = RL.RocketLander(level_number=level, continuous=getattr(agent, "continuous", True),
-                                  reward_params=(agent.meta.get("reward") if agent_kind == "model"
+                                  reward_params=(agent.meta.get("reward") if isinstance(agent, ModelAgent)
                                                  else reward_params),
                                   config=config)
             if agent is None:
@@ -567,13 +648,23 @@ async def simulate(ws: WebSocket) -> None:
             session["agent"] = agent
             env.seed(seed)
             obs = env.reset()
-            code = msg.get("reward_code") or getattr(agent, "reward_code", None)
+            # a trained agent is judged on the challenge it was trained for
+            challenge = (agent.meta.get("challenge") if isinstance(agent, ModelAgent) else None) \
+                or msg.get("challenge") or None
+            if challenge not in CHALLENGES:
+                challenge = None
+            tracker = EpisodeTracker(keep_trajectory=False)
+            # a trained agent shows the reward it was trained with; others the editor's code
+            code = (agent.reward_code if isinstance(agent, ModelAgent) and agent.reward_code
+                    else msg.get("reward_code"))
             custom = CodeReward(code) if code else None
             memory: dict = {}
             ret, custom_ret = 0.0, (0.0 if custom else None)
             await ws.send_json({"type": "init", "world": _world(env), "config": env.config,
                                 "level": level, "agent": agent_kind, "seed": seed,
                                 "frame_skip": agent.frame_skip,
+                                "challenge": challenge,
+                                "snapshot": getattr(agent, "snapshot", None),
                                 "attempt": _summary(agent.attempt) if isinstance(agent, ReplayAgent) else None})
             await ws.send_json(_frame(env, ret, custom_ret))
             if msg.get("countdown"):
@@ -596,6 +687,7 @@ async def simulate(ws: WebSocket) -> None:
                         applied.append([float(x) for x in action])
                     obs, r, done, info = env.step(action)
                     ret += r
+                    tracker.update(info)
                     if touchdown_vy is None and (info["left_leg_contact"] or info["right_leg_contact"]):
                         touchdown_vy = info["velocity_y"] * RL.START_SPEED
                     if is_human and (env.stepnumber % 3 == 0 or done):
@@ -621,6 +713,11 @@ async def simulate(ws: WebSocket) -> None:
                    "fuel": round(info["fuel"], 3), "rotation": round(info["rotation"], 2),
                    "touchdown_vy": None if touchdown_vy is None else round(touchdown_vy, 2),
                    "touchdown_limit": env.config.get("max_touchdown_speed")}
+            summary = tracker.summary()
+            verdict = judge(challenge, summary)
+            end["summary"] = summary
+            end["challenge"] = {"id": challenge, "title": CHALLENGES[challenge]["title"] if challenge else "Atterrir",
+                                **verdict}
             if is_human:
                 attempt = {
                     "id": uuid.uuid4().hex[:10],

@@ -234,3 +234,62 @@ summary:hover { color: var(--text); }
 #board tbody tr:first-child .rank::after { content: " 🏆"; }
 #board .empty-row { color: var(--muted); text-align: center; padding: 16px; }
 @media (max-width: 1100px) { .board-wrap { grid-template-columns: 1fr; } }
+
+/* ---------- challenge objective, toast ---------- */
+.objective {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 14px;
+  padding: 10px 14px; border-radius: var(--radius); border: 1px solid var(--line);
+  background: linear-gradient(90deg, rgba(255,138,61,.14), transparent 70%), var(--panel);
+}
+.objective .obj-title { font-weight: 800; font-size: 15px; }
+.objective .obj-title::before { content: "🎯 "; }
+.objective .obj-goal { color: var(--text); }
+.objective .obj-success { color: var(--muted); font-size: 12.5px; }
+.objective .obj-success b { color: var(--ok); font-weight: 600; }
+.objective.compact { margin: 0 0 12px; padding: 8px 12px; }
+.objective.flash, .panel.flash, .editor-wrap.flash { animation: flash 1.4s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 20;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--accent);
+  padding: 10px 18px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.35); font-weight: 600;
+}
+.toast[hidden] { display: none; }
+.live-badge {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); pointer-events: none;
+  background: rgba(5,10,25,.7); color: #fff; font: 600 12px var(--mono); padding: 3px 10px; border-radius: 10px;
+  border: 1px solid rgba(255,138,61,.6); white-space: nowrap;
+}
+.live-badge[hidden] { display: none; }
+.banner .verdict { display: block; margin-top: 4px; font-size: 13px; font-weight: 700; }
+
+/* ---------- laboratory ---------- */
+.field.wide { grid-column: span 2; }
+.lab { margin-bottom: 18px; }
+.lab-head { flex-wrap: wrap; justify-content: flex-start; }
+.lab-head h2 span { color: var(--text); text-transform: none; letter-spacing: 0; }
+.lab-progress { margin: 6px 0 12px; }
+.lab-grid { display: grid; grid-template-columns: minmax(240px, 0.9fr) minmax(240px, 0.9fr) minmax(300px, 1.2fr); gap: 16px; align-items: start; }
+.lab-col h3.sub { margin-top: 0; }
+#lab-arena .arena { border: 0; }
+#lab-arena .arena-head { display: none; }
+#lab-traj { width: 100%; aspect-ratio: 4 / 5; display: block; border-radius: 8px; background: #0b1230; }
+#lab-chart { width: 100%; height: 200px; display: block; }
+.lab .legend { flex-wrap: wrap; margin: 6px 0; }
+.verdicts { list-style: none; padding: 0; margin: 6px 0 0; font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
+.verdicts li { display: flex; gap: 6px; color: var(--muted); }
+.verdicts li b { color: var(--text); font-weight: 600; }
+.verdicts li:first-child { color: var(--text); }
+.runs-title { display: flex; align-items: baseline; gap: 10px; }
+.run { cursor: pointer; }
+.run.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+@media (max-width: 1200px) { .lab-grid { grid-template-columns: 1fr 1fr; } .lab-grid .lab-col:last-child { grid-column: 1 / -1; } }
+@media (max-width: 760px) { .lab-grid { grid-template-columns: 1fr; } .field.wide { grid-column: auto; } }
+
+/* reward curves of the laboratory */
+#lab-reward { width: 100%; height: 150px; display: block; }
+#lab-returns { width: 100%; height: 70px; display: block; margin-top: 4px; }
+.returns-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-top: 12px !important; }
+.returns-title .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.reward-help { margin: 2px 0 8px; font-size: 11.5px; }
+.verdicts li .ret { margin-left: auto; font-family: var(--mono); color: var(--muted); }

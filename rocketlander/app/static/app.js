@@ -305,7 +305,7 @@ function applyLevel(level, keepOverrides = {}) {
   saveState();
 }
 
-function applyChallenge(id) {
+function applyChallenge(id, { announce = false } = {}) {
   const ch = META.challenges[id];
   state.challenge = id;
   $("#challenge").value = id;
@@ -315,6 +315,11 @@ function applyChallenge(id) {
   refreshScenario();
   setChallengeCode();
   saveState();
+  renderObjective();
+  if (announce) {
+    showToast(`Défi chargé : ${ch.title} (scénario et reward mis à jour)`);
+    flash("#objective", "#train-objective", ".editor-wrap", "#preset-buttons");
+  }
 }
 
 // The editor keeps the user's reward code across reloads (localStorage). `codeOrigin` is the
@@ -329,12 +334,38 @@ function setChallengeCode(note) {
   saveState();
 }
 
+function renderObjective() {
+  const ch = META.challenges[state.challenge];
+  if (!ch) return;
+  const html = `<span class="obj-title">Défi : ${esc(ch.title)}</span><span class="obj-goal">${esc(ch.goal)}</span>
+    <span class="obj-success">Réussi si : <b>${esc(ch.success || "posé 1 s")}</b></span>`;
+  $("#objective").innerHTML = html;
+  $("#train-objective").innerHTML = html;
+}
+
+let toastTimer = null;
+function showToast(text) {
+  const t = $("#toast");
+  t.textContent = text; t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 3200);
+}
+
+function flash(...selectors) {
+  for (const sel of selectors) {
+    const el = $(sel);
+    if (!el) continue;
+    const target = el.closest(".panel") && sel !== ".editor-wrap" && sel !== "#objective" && sel !== "#train-objective" ? el.closest(".panel") : el;
+    target.classList.remove("flash"); void target.offsetWidth; target.classList.add("flash");
+  }
+}
+
 function saveState() { store.set("state", state); }
 
 function initSidebar() {
   const chSel = $("#challenge");
   for (const [id, ch] of Object.entries(META.challenges)) chSel.add(new Option(ch.title, id));
-  chSel.addEventListener("change", () => applyChallenge(chSel.value));
+  chSel.addEventListener("change", () => applyChallenge(chSel.value, { announce: true }));
 
   const lvl = $("#level");
   for (let i = 0; i <= 20; i++) lvl.add(new Option(`Niveau ${i}`, i));
@@ -391,6 +422,7 @@ function initSidebar() {
   }
   if (qp && META.presets[qp]) applyPreset(qp);
   buildRewardFields();
+  renderObjective();
 }
 
 // ===================================================================== rendering
@@ -661,10 +693,14 @@ let BOARD = [];          // leaderboard rows of the current scenario
 const REPLAY_LABELS = {}; // attempt id -> label, for arenas showing a replay
 
 class Arena {
-  constructor(agent = "autopilot") {
+  // opts.container: where to put it (default: the arena grid); opts.fixed: agent chosen by code
+  // (laboratory view), not saved, loops on its own
+  constructor(agent = "autopilot", opts = {}) {
     const node = $("#arena-tpl").content.firstElementChild.cloneNode(true);
-    $("#arenas").appendChild(node);
+    (opts.container || $("#arenas")).appendChild(node);
     this.node = node;
+    this.fixed = !!opts.fixed;
+    this.liveBadge = $(".live-badge", node);
     this.renderer = new Renderer($("canvas", node));
     this.renderer.camMode = $("#camera").value;
     this.select = $(".agent", node);
@@ -698,6 +734,12 @@ class Arena {
       for (const r of models) g.appendChild(new Option(`🧠 ${r.name}`, "model:" + r.name));
       this.select.appendChild(g);
     }
+    const lives = RUNS.filter((r) => r.has_live && (r.status === "running" || this.fixed || prev === "live:" + r.name));
+    if (lives.length) {
+      const g = document.createElement("optgroup"); g.label = "En cours d'apprentissage (dernier instantané)";
+      for (const r of lives) g.appendChild(new Option(`📡 ${r.name}`, "live:" + r.name));
+      this.select.appendChild(g);
+    }
     const replays = BOARD.slice(0, 15).map((a) => [a.id, `🎬 ${a.name} ${outcomeIcon(a.outcome)} ${fmt(a.score, 1)}`]);
     if (prev?.startsWith("replay:") && !replays.some(([id]) => "replay:" + id === prev)) {
       const id = prev.slice(7);
@@ -715,11 +757,13 @@ class Arena {
     const v = this.select.value;
     this.note.classList.remove("error");
     let text = "";
-    if (v.startsWith("model:")) {
-      const r = RUNS.find((x) => x.name === v.slice(6));
+    if (v.startsWith("model:") || v.startsWith("live:")) {
+      const r = RUNS.find((x) => x.name === v.slice(v.indexOf(":") + 1));
       const presetTitle = r?.preset && META.presets[r.preset] ? META.presets[r.preset].title : null;
       text = !r ? "" : presetTitle ? `Scénario d'entraînement : ${presetTitle}`
         : `Scénario d'entraînement : niveau ${r.level}${Object.keys(r.config || {}).length ? " + réglages" : ""}`;
+      if (r?.challenge && META.challenges[r.challenge]) text += ` · défi « ${META.challenges[r.challenge].title} »`;
+      if (v.startsWith("live:")) text = `Dernier instantané de l'entraînement. ${text}`;
     } else if (v.startsWith("replay:")) text = "Replay exact d'une tentative (sa graine et son scénario).";
     else if (v === "human") text = focusedHuman === this ? "C'est toi qui pilotes ici." : "Clique ici pour piloter cette arène.";
     if (this.scenario && !v.startsWith("replay:")) text = `Scénario de ${this.scenario.label}`;
@@ -739,9 +783,10 @@ class Arena {
     if (this.ws?.readyState !== 1) { setTimeout(() => this.start(seed), 200); return; }
     const v = this.select.value;
     const scen = this.scenario || { level: state.level, config: state.config };
-    const msg = { type: "start", seed, speed: Number($("#speed").value), level: scen.level, config: scen.config,
-                  reward: state.reward, reward_code: state.code };
+    const msg = { type: "start", seed, speed: this.fixed ? 2 : Number($("#speed").value), level: scen.level, config: scen.config,
+                  reward: state.reward, reward_code: state.code, challenge: state.challenge };
     if (v.startsWith("model:")) Object.assign(msg, { agent: "model", run: v.slice(6), which: "best", override_scenario: !!this.scenario });
+    else if (v.startsWith("live:")) Object.assign(msg, { agent: "live", run: v.slice(5) });
     else if (v.startsWith("replay:")) Object.assign(msg, { agent: "replay", attempt: v.slice(7) });
     else msg.agent = v;
     this.awaitingGo = false;
@@ -754,6 +799,7 @@ class Arena {
     clearInterval(this.countdownTimer);
     this.countdownEl.hidden = true;
     this.banner.hidden = true;
+    if (!v.startsWith("live:")) this.liveBadge.hidden = true;
     this.updateNote();
     this.running = true;
     this.send(msg);
@@ -778,6 +824,12 @@ class Arena {
   onMessage(m) {
     if (m.type === "init") {
       this.renderer.setWorld(m.world); this.renderer.config = m.config; this.frameSkip = m.frame_skip;
+      this.challenge = m.challenge;
+      $(".cret-label", this.node).textContent = m.agent === "model" || m.agent === "live" ? "sa reward d'entraînement" : "votre reward";
+      if (m.snapshot) {
+        this.liveBadge.textContent = `📡 instantané n°${m.snapshot.snapshot} · ${Math.round(m.snapshot.timesteps / 1000)}k pas`;
+        this.liveBadge.hidden = false;
+      } else this.liveBadge.hidden = true;
       if (m.attempt) this.note.textContent = `Replay : ${m.attempt.name} · ${outcomeLabel(m.attempt.outcome)} · graine ${m.attempt.seed}`;
       if (this.awaitingGo) { this.awaitingGo = false; this.runCountdown(); }
     } else if (m.type === "frame") {
@@ -786,19 +838,29 @@ class Arena {
       $(".cret", this.node).textContent = m.custom_return == null ? "–" : fmt(m.custom_return);
     } else if (m.type === "end") {
       this.running = false;
-      this.total++; if (m.outcome === "success") this.wins++;
+      const verdict = m.challenge || null;
+      const won = verdict && verdict.ok != null ? verdict.ok : m.outcome === "success";
+      this.total++; if (won) this.wins++;
       this.updateTally();
-      const [label, cls] = OUTCOMES[m.outcome] || [m.outcome, "fail"];
+      const [label, outcomeCls] = OUTCOMES[m.outcome] || [m.outcome, "fail"];
       const extra = m.outcome === "success" ? `position ${fmt(m.x_on_ship, 2)} · carburant ${Math.round(m.fuel * 100)}%` : `après ${(m.steps / 60).toFixed(1)} s`;
+      let cls = outcomeCls;
+      if (verdict && verdict.ok === true) cls = "success";
+      else if (verdict && verdict.ok === false && m.outcome === "success") cls = "timeout";  // landed, challenge missed
+      const mark = !verdict || verdict.ok == null ? "" : verdict.ok ? " ✓" : " ✗";
+      const vline = verdict && verdict.id && verdict.id !== "landing" ? `<span class="verdict">Défi ${esc(verdict.title)} : ${esc(verdict.text)}${mark}</span>` : "";
       this.banner.className = `banner ${cls}`;
-      this.banner.innerHTML = `${label}<small>${extra}</small>`;
+      this.banner.innerHTML = `${label}<small>${extra}</small>${vline}`;
       this.banner.hidden = false;
       if (m.attempt) { showResult(m); refreshBoard(); }
-      if ($("#loop").checked && this.select.value !== "human") {
-        setTimeout(() => { if (!this.running) this.start(Number($("#seed").value) + this.total); }, 1200);
+      if ((this.fixed && labVisible()) || (!this.fixed && $("#loop").checked && this.select.value !== "human")) {
+        setTimeout(() => { if (!this.running && !this.destroyed) this.start(Number($("#seed").value) + this.total); }, this.fixed ? 900 : 1200);
       }
     } else if (m.type === "error") {
+      this.running = false;
       this.note.textContent = m.message; this.note.classList.add("error");
+      // laboratory: no snapshot yet at the very start of a training, try again shortly
+      if (this.fixed && !this.destroyed) setTimeout(() => { if (!this.running && !this.destroyed && labVisible()) this.start(); }, 3000);
     }
   }
 
@@ -809,8 +871,7 @@ class Arena {
     clearInterval(this.countdownTimer);
     this.ws?.close();
     this.node.remove();
-    arenas.splice(arenas.indexOf(this), 1);
-    saveArenas();
+    if (arenas.includes(this)) { arenas.splice(arenas.indexOf(this), 1); saveArenas(); }
   }
 }
 
@@ -1022,7 +1083,11 @@ function initArena() {
     const s = JSON.stringify(boardScenario());
     if (s !== lastScen) { lastScen = s; refreshBoard(); }
   }, 1000);
-  const loop = (t) => { arenas.forEach((a) => a.renderer.draw(t)); requestAnimationFrame(loop); };
+  const loop = (t) => {
+    arenas.forEach((a) => a.renderer.draw(t));
+    if (lab.arena && $("#tab-runs").classList.contains("active")) lab.arena.renderer.draw(t);
+    requestAnimationFrame(loop);
+  };
   requestAnimationFrame(loop);
 }
 
@@ -1047,12 +1112,17 @@ function drawChart(canvas, history) {
   const tMax = history[history.length - 1].t;
   c.textAlign = "center";
   c.fillText(`${Math.round(tMax / 1000)}k pas`, w - 30 * dpr, h - 4 * dpr);
-  const series = [["success_rate", css.getPropertyValue("--ok")], ["crash_rate", css.getPropertyValue("--bad")], ["timeout_rate", css.getPropertyValue("--warn")]];
-  for (const [key, color] of series) {
-    c.strokeStyle = color; c.lineWidth = 2 * dpr; c.beginPath();
-    history.forEach((p, i) => {
-      const x = padL + (p.t / tMax) * (w - padL - padR), y = padT + (1 - (p[key] ?? 0)) * (h - padT - padB);
-      i ? c.lineTo(x, y) : c.moveTo(x, y);
+  const series = [["success_rate", css.getPropertyValue("--ok"), 2], ["crash_rate", css.getPropertyValue("--bad"), 1.5],
+                  ["timeout_rate", css.getPropertyValue("--warn"), 1.5]];
+  // the challenge success rate is the main line when the run is judged on a challenge
+  if (history.some((p) => p.challenge_rate != null)) series.push(["challenge_rate", css.getPropertyValue("--accent"), 3.5]);
+  for (const [key, color, width] of series) {
+    c.strokeStyle = color; c.lineWidth = width * dpr; c.beginPath();
+    let started = false;
+    history.forEach((p) => {
+      if (p[key] == null) return;
+      const x = padL + (p.t / tMax) * (w - padL - padR), y = padT + (1 - p[key]) * (h - padT - padB);
+      started ? c.lineTo(x, y) : c.moveTo(x, y); started = true;
     });
     c.stroke();
   }
@@ -1071,7 +1141,7 @@ function runCard(r) {
       <div class="run-meta"></div>
       <div class="progress"><div></div></div>
       <canvas class="chart"></canvas>
-      <div class="legend"><span><i style="background:var(--ok)"></i>atterrissages</span><span><i style="background:var(--bad)"></i>crashs</span><span><i style="background:var(--warn)"></i>temps écoulé</span></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>défi</span><span><i style="background:var(--ok)"></i>atterrissages</span><span><i style="background:var(--bad)"></i>crashs</span><span><i style="background:var(--warn)"></i>temps écoulé</span></div>
       <div class="run-stats"></div>
       <div class="run-actions">
         <button class="small watch">Voir dans l'arène</button>
@@ -1081,6 +1151,7 @@ function runCard(r) {
         <button class="small ghost del">Supprimer</button>
       </div>
       <pre class="log" hidden></pre>`;
+    card.addEventListener("click", (e) => { if (!e.target.closest("button, pre")) focusLab(r.name); });
     $(".watch", card).addEventListener("click", () => watchRun(r.name));
     $(".load", card).addEventListener("click", () => loadRunSettings(r.name));
     $(".stop", card).addEventListener("click", async () => { await fetch(`/api/runs/${r.name}/stop`, { method: "POST" }); refreshRuns(); });
@@ -1100,18 +1171,12 @@ function runCard(r) {
   const pill = $(".pill", card); pill.className = `pill ${r.status}`;
   pill.textContent = { running: "en cours", starting: "démarrage", done: "terminé", stopped: "arrêté", failed: "erreur" }[r.status] || r.status;
   const p = r.progress || {};
-  const ch = r.custom_reward ? "reward perso" : "reward de base";
-  $(".run-meta", card).textContent = `${r.algo || "PPO"} · ${r.preset || `niveau ${r.level}`} · ${r.continuous === false ? "discret" : "continu"} · ${ch} · ${Math.round((p.timesteps || 0) / 1000)}k / ${Math.round((r.timesteps || 0) / 1000)}k pas`;
+  $(".run-meta", card).textContent = runMeta(r);
+  card.classList.toggle("selected", lab.run === r.name);
   $(".progress > div", card).style.width = `${Math.min(100, 100 * (p.timesteps || 0) / (r.timesteps || 1))}%`;
-  const l = p.latest || {}, ev = r.eval;
-  const stat = (v, label) => `<span class="stat"><b>${v}</b><small>${label}</small></span>`;
-  $(".run-stats", card).innerHTML = ev
-    ? stat(`${Math.round(ev.success_rate * 100)}%`, "réussite (éval)") + stat(`${Math.round(ev.crash_rate * 100)}%`, "crash (éval)") +
-      stat(fmt(ev.mean_return, 1), "reward moy.") + stat(ev.mean_abs_x_when_landed == null ? "–" : fmt(ev.mean_abs_x_when_landed, 3), "écart au centre")
-    : stat(l.success_rate == null ? "–" : `${Math.round(l.success_rate * 100)}%`, "réussite") + stat(l.crash_rate == null ? "–" : `${Math.round(l.crash_rate * 100)}%`, "crash") +
-      stat(fmt(l.episode_return, 1), "reward moy.") + stat(p.episodes ?? 0, "épisodes");
+  $(".run-stats", card).innerHTML = runStats(r);
   $(".stop", card).hidden = r.status !== "running" && r.status !== "starting";
-  $(".watch", card).disabled = !(r.has_best || r.has_last);
+  $(".watch", card).disabled = !(r.has_best || r.has_last || r.has_live);
   $(".load", card).hidden = !r.reward_code;
   return card;
 }
@@ -1140,14 +1205,18 @@ async function refreshRuns() {
     }
   }
   arenas.forEach((a) => a.fillAgents());
+  fillInitRuns();
+  refreshLab();
 }
 
 function watchRun(name) {
   switchTab("arena");
   const a = arenas[0] || addArena();
   a.scenario = null;
-  a.fillAgents("model:" + name);
-  a.select.value = "model:" + name;
+  const r = RUNS.find((x) => x.name === name);
+  const agent = r && !(r.has_best || r.has_last) && r.has_live ? "live:" + name : "model:" + name;
+  a.fillAgents(agent);
+  a.select.value = agent;
   a.wins = a.total = 0; a.updateTally(); a.updateNote(); saveArenas();
   a.start();
 }
@@ -1161,21 +1230,321 @@ async function loadRunSettings(name) {
 }
 
 async function startTraining() {
-  const msg = $("#train-msg");
   const body = {
     name: $("#run-name").value || META.challenges[state.challenge]?.title || "run",
     level: state.level, continuous: $("#mode").value === "cont", algo: $("#algo").value,
     timesteps: Number($("#timesteps").value), gamma: Number($("#gamma").value),
     config: diffFromLevel(), reward: state.reward, reward_code: state.code, preset: scenarioLabel(),
+    challenge: state.challenge, init_run: $("#init-run").value || null,
   };
+  await postTraining(body);
+}
+
+async function postTraining(body) {
+  const msg = $("#train-msg");
   $("#train").disabled = true;
   try {
     const res = await fetch("/api/train", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
     msg.hidden = false;
-    if (!res.ok) { msg.className = "msg error"; msg.textContent = data.detail; }
-    else { msg.className = "msg ok"; msg.textContent = `Entraînement « ${data.name} » lancé.`; refreshRuns(); }
+    if (!res.ok) { msg.className = "msg error"; msg.textContent = data.detail; return; }
+    const from = data.init_model ? ` à partir de « ${body.init_run} »` : " (agent vierge)";
+    msg.className = "msg ok"; msg.textContent = `Entraînement « ${data.name} » lancé${from}. Suis-le ci-dessous.`;
+    switchTab("runs");
+    await refreshRuns();
+    focusLab(data.name);
+    $("#lab").scrollIntoView({ behavior: "smooth", block: "start" });
   } finally { $("#train").disabled = false; }
+}
+
+// ---------------------------------------------------------------- laboratory
+
+const lab = { run: store.get("labRun", null), arena: null, episodesT: null };
+// the live arena only plays while the laboratory is on screen (it costs CPU on the server)
+const labVisible = () => $("#tab-runs").classList.contains("active") && !document.hidden;
+window.rrl.lab = lab;
+
+const challengeTitle = (id) => (id && META.challenges[id] ? META.challenges[id].title : "Atterrir");
+const pct = (v) => (v == null ? "–" : `${Math.round(v * 100)}%`);
+const dur = (s) => (s == null ? "–" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`);
+
+function runMeta(r) {
+  const p = r.progress || {};
+  const ch = r.custom_reward ? "reward perso" : "reward de base";
+  const from = r.init_model ? ` · parti de ${r.init_model.split(/[\\/]/).slice(-2, -1)[0] || "un agent"}` : "";
+  return `Défi « ${challengeTitle(r.challenge)} » · ${r.algo || "PPO"} · ${r.preset || `niveau ${r.level}`} · ${r.continuous === false ? "discret" : "continu"} · ${ch}${from} · ${Math.round((p.timesteps || 0) / 1000)}k / ${Math.round((r.timesteps || 0) / 1000)}k pas`;
+}
+
+function runStats(r) {
+  const p = r.progress || {}, l = p.latest || {}, ev = r.eval;
+  const stat = (v, label) => `<span class="stat"><b>${v}</b><small>${label}</small></span>`;
+  const judged = r.challenge && r.challenge !== "landing";
+  if (ev) {
+    return (judged ? stat(pct(ev.challenge_rate), "défi réussi (éval)") : "") +
+      stat(pct(ev.success_rate), "posé (éval)") + stat(pct(ev.crash_rate), "crash (éval)") +
+      stat(fmt(ev.mean_return, 1), "reward moy.") + (judged ? "" : stat(ev.mean_abs_x_when_landed == null ? "–" : fmt(ev.mean_abs_x_when_landed, 3), "écart au centre"));
+  }
+  return (judged ? stat(pct(l.challenge_rate), "défi réussi") : "") + stat(pct(l.success_rate), "posé") +
+    stat(pct(l.crash_rate), "crash") + stat(fmt(l.episode_return, 1), "reward moy.") + (judged ? "" : stat(p.episodes ?? 0, "épisodes"));
+}
+
+function bestLandingRun() {
+  return [...RUNS].filter((r) => (r.has_best || r.has_last) && (!r.challenge || r.challenge === "landing"))
+    .sort((a, b) => (b.eval?.success_rate ?? b.progress?.latest?.success_rate ?? -1) - (a.eval?.success_rate ?? a.progress?.latest?.success_rate ?? -1))[0];
+}
+
+let initFilled = false;
+function fillInitRuns() {
+  const sel = $("#init-run");
+  const prev = initFilled ? sel.value : store.get("initRun", undefined);
+  const best = bestLandingRun();
+  sel.innerHTML = "";
+  sel.add(new Option("Agent vierge (part de zéro)", ""));
+  for (const r of RUNS.filter((x) => x.has_best || x.has_last || x.has_live)) {
+    const score = r.eval?.success_rate ?? r.progress?.latest?.success_rate;
+    const label = `${r === best ? "⭐ " : ""}${r.name} — ${challengeTitle(r.challenge)}${score != null ? ` · ${pct(score)} posé` : ""}${r === best ? " (recommandé)" : ""}`;
+    sel.add(new Option(label, r.name));
+  }
+  const want = prev !== undefined ? prev : best?.name || "";
+  sel.value = [...sel.options].some((o) => o.value === want) ? want : "";
+  initFilled = true;
+  updateInitHint();
+}
+
+function updateInitHint() {
+  const on = !!$("#init-run").value;
+  $("#init-hint").hidden = !on;
+  $("#algo").disabled = on; $("#mode").disabled = on;
+}
+
+function focusLab(name) {
+  lab.run = name;
+  store.set("labRun", name);
+  lab.episodesT = null;
+  runCards.forEach((card, n) => card.classList.toggle("selected", n === name));
+  refreshLab();
+}
+
+async function refreshLab() {
+  let r = RUNS.find((x) => x.name === lab.run);
+  if (!r) {  // default: the newest running training, else the newest one
+    r = RUNS.find((x) => x.status === "running") || RUNS[0];
+    if (r) { lab.run = r.name; runCards.forEach((card, n) => card.classList.toggle("selected", n === r.name)); }
+  }
+  const box = $("#lab");
+  if (!r) { box.hidden = true; return; }
+  box.hidden = false;
+  $("#lab-title").textContent = r.name;
+  const pill = $("#lab-status"); pill.className = `pill ${r.status}`;
+  pill.textContent = { running: "en cours", starting: "démarrage", done: "terminé", stopped: "arrêté", failed: "erreur" }[r.status] || r.status;
+  const p = r.progress || {};
+  $("#lab-time").textContent = r.status === "running"
+    ? `écoulé ${dur(r.elapsed_s)} · reste ~${dur(r.eta_s)}` : r.elapsed_s ? `durée ${dur(r.elapsed_s)}` : "";
+  $("#lab-meta").textContent = runMeta(r);
+  $(".lab-progress > div").style.width = `${Math.min(100, 100 * (p.timesteps || 0) / (r.timesteps || 1))}%`;
+  $("#lab-stats").innerHTML = runStats(r);
+  $("#lab-stop").hidden = r.status !== "running";
+  $("#lab-watch").disabled = !(r.has_best || r.has_last || r.has_live);
+  $("#lab-load").hidden = !r.reward_code;
+
+  // live arena: latest snapshot (falls back to the saved model once there is no live file)
+  const agent = r.has_live ? "live:" + r.name : (r.has_best || r.has_last) ? "model:" + r.name : null;
+  if (!lab.arena) lab.arena = new Arena(agent || "autopilot", { container: $("#lab-arena"), fixed: true });
+  const a = lab.arena;
+  if (agent && a.agentKey !== agent) {
+    a.agentKey = agent;
+    a.fillAgents(agent);
+    a.wins = a.total = 0; a.updateTally(); a.updateNote();
+    if (labVisible()) a.start(); else a.send({ type: "stop" });
+  } else if (agent && !a.running && labVisible()) {
+    a.start();  // back on the laboratory tab: resume the live episodes
+  } else if (!agent) {
+    a.agentKey = null;
+    a.note.textContent = "En attente du premier instantané de l'agent…";
+  }
+
+  // learning curves + recent episodes
+  const kind = rewardKind(r);
+  $("#lab-reward-kind").textContent = `· ${kind}`;
+  $("#lab-returns-kind").textContent = `· ${kind}`;
+  fetch(`/api/runs/${r.name}`).then((x) => x.json()).then((full) => {
+    drawChart($("#lab-chart"), full.progress?.history);
+    drawRewardCurve($("#lab-reward"), full.progress?.history);
+  });
+  if (r.status === "running" || lab.episodesT !== (p.timesteps || 0)) {
+    lab.episodesT = p.timesteps || 0;
+    const data = await (await fetch(`/api/runs/${r.name}/episodes`)).json();
+    drawEpisodes($("#lab-traj"), data.episodes, r);
+    drawReturns($("#lab-returns"), data.episodes);
+    renderVerdicts(data.episodes, r);
+  }
+}
+
+function episodeColor(e, css) {
+  const ok = e.challenge?.ok;
+  if (ok === true || (ok == null && e.outcome === "success")) return css("--ok");
+  if (e.outcome === "success") return css("--info");     // landed, challenge missed
+  if (e.outcome === "timeout") return css("--warn");
+  if (["crash", "broken_leg", "outside"].includes(e.outcome)) return css("--bad");
+  return css("--muted");
+}
+
+function drawEpisodes(canvas, episodes, r) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr); canvas.height = Math.round(rect.height * dpr);
+  const c = canvas.getContext("2d"), w = canvas.width, h = canvas.height;
+  const cs = getComputedStyle(document.documentElement);
+  const css = (n) => cs.getPropertyValue(n).trim();
+  const cfg = { ...META.levels[r.level], ...(r.config || {}) };
+  const W = 267.4, shipW = 102.48 * (cfg.ship_width ?? 1);
+  const maxAlt = Math.max(385 * 0.97, ...((episodes || []).flatMap((e) => e.trajectory.map((p) => p[1]))));
+  const yLo = -22, yHi = maxAlt + 8;
+  const sc = Math.min(w / W, h / (yHi - yLo));
+  const ox = w / 2, oy = h - (h - (yHi - yLo) * sc) / 2;
+  const X = (x) => ox + x * sc, Y = (y) => oy - (y - yLo) * sc;
+  // sky, sea, ship
+  const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, "#0b1230"); g.addColorStop(1, "#2a3a78");
+  c.fillStyle = g; c.fillRect(0, 0, w, h);
+  c.fillStyle = "#14306b"; c.fillRect(0, Y(-1.3), w, h - Y(-1.3));
+  c.fillStyle = "#2b2f3a"; c.fillRect(X(-shipW / 2), Y(0), shipW * sc, Math.max(2 * dpr, 1.3 * sc));
+  c.strokeStyle = "#ffd23f"; c.lineWidth = 2 * dpr;
+  c.beginPath(); c.moveTo(X(-shipW / 2), Y(0)); c.lineTo(X(shipW / 2), Y(0)); c.stroke();
+  if (!episodes?.length) {
+    c.fillStyle = "#8f9bbd"; c.font = `${12 * dpr}px system-ui`; c.textAlign = "center";
+    c.fillText("en attente des premiers essais…", w / 2, h / 2); return;
+  }
+  const n = episodes.length;
+  episodes.forEach((e, i) => {
+    const newest = i === n - 1;
+    c.globalAlpha = newest ? 1 : 0.12 + 0.55 * (i / n);
+    c.strokeStyle = episodeColor(e, css); c.lineWidth = (newest ? 2.5 : 1.2) * dpr;
+    c.beginPath();
+    e.trajectory.forEach(([x, y], k) => (k ? c.lineTo(X(x), Y(y)) : c.moveTo(X(x), Y(y))));
+    c.stroke();
+    const [ex, ey] = e.trajectory[e.trajectory.length - 1];
+    c.fillStyle = c.strokeStyle;
+    c.beginPath(); c.arc(X(ex), Y(ey), (newest ? 3.5 : 2) * dpr, 0, Math.PI * 2); c.fill();
+  });
+  // orientation of the rocket along the newest attempt (shows flips)
+  const last = episodes[n - 1];
+  c.globalAlpha = 1; c.strokeStyle = "#ffffff"; c.lineWidth = 1.5 * dpr;
+  last.trajectory.forEach(([x, y, a], k) => {
+    if (k % 6) return;
+    const th = a * Math.PI, len = 7;
+    c.beginPath(); c.moveTo(X(x), Y(y)); c.lineTo(X(x - Math.sin(th) * len), Y(y + Math.cos(th) * len)); c.stroke();
+  });
+  c.globalAlpha = 1;
+  c.fillStyle = "rgba(255,255,255,0.75)"; c.font = `${11 * dpr}px system-ui`; c.textAlign = "left";
+  c.fillText(`${n} derniers essais · le plus récent en gras`, 8 * dpr, 16 * dpr);
+}
+
+// which reward the curves show: the code of the run (custom) or the environment's default one
+const rewardKind = (r) => (r.custom_reward ? "reward du défi (votre code)" : "reward de base");
+
+function chartFrame(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr); canvas.height = Math.round(rect.height * dpr);
+  const cs = getComputedStyle(document.documentElement);
+  return { c: canvas.getContext("2d"), w: canvas.width, h: canvas.height, dpr, css: (n) => cs.getPropertyValue(n).trim() };
+}
+
+const niceNum = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1));
+
+// mean reward of the last 100 episodes along training, with a 10-90 % band
+function drawRewardCurve(canvas, history) {
+  const { c, w, h, dpr, css } = chartFrame(canvas);
+  const pad = { l: 38 * dpr, r: 8 * dpr, t: 8 * dpr, b: 16 * dpr };
+  c.clearRect(0, 0, w, h);
+  c.font = `${10 * dpr}px system-ui`; c.fillStyle = css("--muted");
+  const pts = (history || []).filter((p) => p.episode_return != null && Number.isFinite(p.episode_return));
+  if (!pts.length) { c.textAlign = "center"; c.fillText("en attente des premiers épisodes…", w / 2, h / 2); return; }
+  const lo0 = Math.min(...pts.map((p) => p.episode_return_p10 ?? p.episode_return), 0);
+  const hi0 = Math.max(...pts.map((p) => p.episode_return_p90 ?? p.episode_return), 0);
+  const span = Math.max(1e-6, hi0 - lo0), lo = lo0 - span * 0.05, hi = hi0 + span * 0.05;
+  const tMax = pts[pts.length - 1].t || 1;
+  const X = (t) => pad.l + (t / tMax) * (w - pad.l - pad.r);
+  const Y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (h - pad.t - pad.b);
+  // axes: zero line + min / max labels
+  c.strokeStyle = css("--line"); c.lineWidth = dpr;
+  c.beginPath(); c.moveTo(pad.l, Y(0)); c.lineTo(w - pad.r, Y(0)); c.stroke();
+  c.textAlign = "right";
+  c.fillText(niceNum(hi0), pad.l - 4 * dpr, Y(hi0) + 3 * dpr);
+  c.fillText(niceNum(lo0), pad.l - 4 * dpr, Y(lo0) + 3 * dpr);
+  if (Math.abs(Y(0) - Y(hi0)) > 12 * dpr && Math.abs(Y(0) - Y(lo0)) > 12 * dpr) c.fillText("0", pad.l - 4 * dpr, Y(0) + 3 * dpr);
+  c.textAlign = "center"; c.fillText(`${Math.round(tMax / 1000)}k pas`, w - 26 * dpr, h - 3 * dpr);
+  // band
+  if (pts.some((p) => p.episode_return_p10 != null)) {
+    c.fillStyle = css("--accent"); c.globalAlpha = 0.18; c.beginPath();
+    pts.forEach((p, i) => (i ? c.lineTo(X(p.t), Y(p.episode_return_p90 ?? p.episode_return)) : c.moveTo(X(p.t), Y(p.episode_return_p90 ?? p.episode_return))));
+    [...pts].reverse().forEach((p) => c.lineTo(X(p.t), Y(p.episode_return_p10 ?? p.episode_return)));
+    c.closePath(); c.fill(); c.globalAlpha = 1;
+  }
+  // mean
+  c.strokeStyle = css("--accent"); c.lineWidth = 2.5 * dpr; c.beginPath();
+  pts.forEach((p, i) => (i ? c.lineTo(X(p.t), Y(p.episode_return)) : c.moveTo(X(p.t), Y(p.episode_return))));
+  c.stroke();
+  const last = pts[pts.length - 1];
+  c.fillStyle = css("--accent"); c.beginPath(); c.arc(X(last.t), Y(last.episode_return), 3 * dpr, 0, Math.PI * 2); c.fill();
+  c.textAlign = "right"; c.fillStyle = css("--text"); c.font = `600 ${11 * dpr}px system-ui`;
+  c.fillText(`moyenne ${niceNum(last.episode_return)}`, w - pad.r, pad.t + 10 * dpr);
+}
+
+// reward of each recent attempt, as bars coloured like the trajectories (newest on the right)
+function drawReturns(canvas, episodes) {
+  const { c, w, h, dpr, css } = chartFrame(canvas);
+  c.clearRect(0, 0, w, h);
+  const eps = (episodes || []).filter((e) => e.return != null && Number.isFinite(e.return));
+  c.font = `${10 * dpr}px system-ui`; c.fillStyle = css("--muted");
+  if (!eps.length) { c.textAlign = "center"; c.fillText("pas encore d'essai terminé", w / 2, h / 2); return; }
+  const pad = { l: 38 * dpr, r: 4 * dpr, t: 4 * dpr, b: 4 * dpr };
+  const lo = Math.min(0, ...eps.map((e) => e.return)), hi = Math.max(0, ...eps.map((e) => e.return));
+  const span = Math.max(1e-6, hi - lo);
+  const Y = (v) => pad.t + (1 - (v - lo) / span) * (h - pad.t - pad.b);
+  const slot = (w - pad.l - pad.r) / eps.length, bw = Math.max(1, slot * 0.72);
+  eps.forEach((e, i) => {
+    const x = pad.l + i * slot + (slot - bw) / 2, y0 = Y(0), y1 = Y(e.return);
+    c.globalAlpha = i === eps.length - 1 ? 1 : 0.35 + 0.55 * (i / eps.length);
+    c.fillStyle = episodeColor(e, css);
+    c.fillRect(x, Math.min(y0, y1), bw, Math.max(1, Math.abs(y1 - y0)));
+  });
+  c.globalAlpha = 1;
+  c.strokeStyle = css("--line"); c.lineWidth = dpr;
+  c.beginPath(); c.moveTo(pad.l, Y(0)); c.lineTo(w - pad.r, Y(0)); c.stroke();
+  c.fillStyle = css("--muted"); c.textAlign = "right";
+  c.fillText(niceNum(hi), pad.l - 4 * dpr, Y(hi) + 8 * dpr);
+  c.fillText(niceNum(lo), pad.l - 4 * dpr, Y(lo));
+}
+
+function renderVerdicts(episodes, r) {
+  const list = $("#lab-verdicts");
+  const recent = (episodes || []).slice(-6).reverse();
+  list.innerHTML = recent.map((e) => {
+    const ok = e.challenge?.ok;
+    const icon = ok === true ? "✅" : ok === false ? (e.outcome === "success" ? "🟦" : outcomeIcon(e.outcome)) : outcomeIcon(e.outcome);
+    return `<li><span>${icon}</span><b>${esc(e.challenge?.text || outcomeLabel(e.outcome))}</b><span>· ${Math.round(e.t / 1000)}k pas</span><span class="ret">${e.return == null ? "" : `reward ${fmt(e.return, 1)}`}</span></li>`;
+  }).join("") || `<li>Pas encore d'essai terminé.</li>`;
+}
+
+async function continueRun() {
+  const r = RUNS.find((x) => x.name === lab.run);
+  if (!r) return;
+  const full = await (await fetch(`/api/runs/${r.name}`)).json();
+  await postTraining({
+    name: `${r.name.replace(/_\d{8}-\d{6}$/, "")}-suite`, level: r.level, continuous: r.continuous !== false,
+    algo: r.algo || "PPO", timesteps: Number($("#timesteps").value), gamma: r.gamma ?? 0.999,
+    config: r.config || {}, reward: r.reward || {}, reward_code: full.reward_code, preset: r.preset,
+    challenge: r.challenge, init_run: r.name,
+  });
+}
+
+function initLab() {
+  $("#init-run").addEventListener("change", () => { store.set("initRun", $("#init-run").value); updateInitHint(); });
+  $("#lab-stop").addEventListener("click", async () => { if (lab.run) { await fetch(`/api/runs/${lab.run}/stop`, { method: "POST" }); refreshRuns(); } });
+  $("#lab-watch").addEventListener("click", () => lab.run && watchRun(lab.run));
+  $("#lab-continue").addEventListener("click", continueRun);
+  $("#lab-load").addEventListener("click", () => lab.run && loadRunSettings(lab.run));
 }
 
 function diffFromLevel() {
@@ -1191,6 +1560,7 @@ function switchTab(name) {
   $$(".tab-page").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
   store.set("tab", name);
   if (name === "runs") refreshRuns();
+  else if (lab.arena?.running) { lab.arena.send({ type: "stop" }); lab.arena.running = false; }
 }
 
 function initTheme() {
@@ -1201,6 +1571,7 @@ function initTheme() {
     const next = cur === "light" ? "dark" : "light";
     document.documentElement.dataset.theme = next; store.set("theme", next);
     runCards.forEach((card, name) => drawChart($("canvas.chart", card), histories.get(name)?.h));
+    lab.episodesT = null; refreshLab();
   });
 }
 
@@ -1212,6 +1583,8 @@ async function boot() {
   initArena();
   $$(".tab").forEach((t) => t.addEventListener("click", () => switchTab(t.dataset.tab)));
   $("#train").addEventListener("click", startTraining);
+  initLab();
+  refreshLab();
   const params = new URLSearchParams(location.search);
   switchTab(params.get("tab") || store.get("tab", "arena"));
   setInterval(refreshRuns, 2500);
@@ -1221,4 +1594,8 @@ async function boot() {
   if (params.has("autoplay")) setTimeout(startAll, 300);
 }
 
-boot();
+boot().catch((e) => {
+  console.error(e);
+  document.title = `Rocket RL Lab (erreur : ${e.message})`;
+  showToast(`Erreur au chargement de la page : ${e.message}`);
+});
