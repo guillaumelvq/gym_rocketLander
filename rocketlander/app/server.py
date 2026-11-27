@@ -625,7 +625,9 @@ async def simulate(ws: WebSocket) -> None:
                 config = attempt["config"]
                 reward_params = attempt.get("reward_params") or {}
             elif agent_kind in ("model", "live"):
-                agent: Agent = ModelAgent(msg["run"], "live" if agent_kind == "live" else msg.get("which", "best"))
+                # loading a model takes a moment: off the event loop, other pages stay responsive
+                agent: Agent = await asyncio.to_thread(
+                    ModelAgent, msg["run"], "live" if agent_kind == "live" else msg.get("which", "best"))
                 # a model is shown in the scenario it was trained on, unless the page overrides it
                 if not msg.get("override_scenario"):
                     level = int(agent.meta.get("level", level))
@@ -652,7 +654,9 @@ async def simulate(ws: WebSocket) -> None:
             if challenge not in CHALLENGES:
                 challenge = None
             tracker = EpisodeTracker(keep_trajectory=False)
-            code = msg.get("reward_code") or getattr(agent, "reward_code", None)
+            # a trained agent shows the reward it was trained with; others the editor's code
+            code = (agent.reward_code if isinstance(agent, ModelAgent) and agent.reward_code
+                    else msg.get("reward_code"))
             custom = CodeReward(code) if code else None
             memory: dict = {}
             ret, custom_ret = 0.0, (0.0 if custom else None)

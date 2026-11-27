@@ -57,7 +57,7 @@ directement les arènes.
 | **Scénario** | Six préréglages de difficulté (Découverte → Cauchemar), puis des règles à cocher ou à choisir : pieds fragiles et limite de vitesse au contact, zone d'atterrissage, point, hauteur et vitesse de départ, jambes, carburant, fin à l'atterrissage… *Réglages fins* donne les valeurs exactes (un point orange signale une valeur modifiée) ; *Niveaux avancés* propose l'échelle numérique 0 à 20. |
 | **Reward** | Le code Python de ta reward, et les poids de la reward de base. |
 | **Onglet Arène** | Une ou plusieurs simulations en direct, chacune avec son pilote. |
-| **Onglet Entraînements** | Lancer un entraînement et suivre les courbes d'apprentissage. |
+| **Onglet Laboratoire** | Lancer un entraînement et regarder l'agent apprendre en direct. |
 
 ### Arène : regarder, comparer, piloter
 
@@ -72,7 +72,11 @@ directement les arènes.
 - **Vitesse** va de ×0.25 à ×8. **Caméra** : *Auto* zoome près du sol, *Suivi* reste zoomée
   sur la fusée.
 - **Enchaîner** relance un épisode dès que le précédent se termine, avec une nouvelle graine.
-  Le compteur « réussites » mesure la fiabilité.
+  Le compteur « défi réussi » mesure la fiabilité.
+- Le bandeau **🎯 Défi** au-dessus des arènes rappelle l'objectif du défi choisi et ce qui
+  compte comme une réussite. À la fin de chaque épisode, le résultat indique le verdict du
+  défi (par exemple « Défi Faire un salto : 0,98 tour, puis posé ✗ »). Un agent entraîné est
+  jugé sur le défi de son entraînement.
 - Un agent entraîné joue dans **le scénario de son entraînement**, pas celui de la barre
   latérale.
 
@@ -156,20 +160,45 @@ sous l'arène.
   bateau rapporte des points et l'épisode ne s'arrête pas à l'atterrissage. Que fait
   l'agent ?
 
-### Entraîner
+### Entraîner dans l'application
 
-1. Choisis un **défi**, règle le **scénario**, écris la **reward**.
-2. Onglet **Entraînements** : donne un nom, choisis la durée, puis **Lancer l'entraînement**.
-   Le code de la reward est vérifié avant le lancement.
-3. La carte du run montre la progression et la courbe du **taux d'atterrissage**, des
-   **crashs** et des **temps écoulés** sur les 100 derniers épisodes. À la fin, une
-   évaluation sur 100 épisodes s'affiche.
-4. **Voir dans l'arène** fait jouer le meilleur modèle. **Charger sa reward** remet le code
-   et le scénario de ce run dans la barre latérale.
+1. Choisis un **défi**, règle le **scénario**, écris (ou modifie) la **reward**.
+2. Onglet **Laboratoire** : donne un nom, choisis la durée et le **point de départ** :
+   - **Agent vierge** : l'agent part de zéro. Il lui faut plusieurs centaines de milliers de
+     pas pour apprendre à atterrir.
+   - **Partir d'un agent existant** (⭐ recommandé : le meilleur agent qui sait déjà atterrir).
+     L'agent garde ce qu'il sait faire et s'adapte au nouveau défi ou à la nouvelle reward :
+     c'est beaucoup plus rapide, idéal pour les défis (salto, bord, un pied puis l'autre…).
+     L'algorithme et le type d'actions sont repris de cet agent.
+3. **Lancer l'entraînement** : le code de la reward est vérifié, puis le panneau
+   **Entraînement suivi** montre l'apprentissage en direct :
+   - **L'agent en direct** : une arène qui rejoue sans arrêt le dernier *instantané* de l'agent
+     (sauvegardé une trentaine de fois pendant l'entraînement, numéro affiché en bas). On le
+     voit changer de comportement au fil des instantanés.
+   - **Essais récents** : les trajectoires des 40 derniers essais de l'entraînement, en
+     couleur selon le verdict (vert : défi réussi, bleu : posé mais défi raté, rouge : crash,
+     jaune : temps écoulé). Sur le plus récent, des traits blancs montrent l'orientation de la
+     fusée : un salto se voit. En dessous, la **reward de chaque essai** (une barre par essai)
+     et la liste des derniers verdicts.
+   - **Progression** : le taux de réussite du défi (ligne orange), d'atterrissage, de crash
+     et de temps écoulé sur les 100 derniers essais, puis la **reward moyenne par essai** avec
+     une bande du 10ᵉ au 90ᵉ percentile. Le titre précise s'il s'agit de la *reward du défi
+     (votre code)* ou de la *reward de base*. Une reward qui monte alors que le défi reste à 0 %
+     est le signe d'une reward qui récompense autre chose que l'objectif.
+   - Temps écoulé, temps restant estimé, **■ Arrêter**.
+4. À la fin : une évaluation sur 100 épisodes (réussite du défi, atterrissages, crashs),
+   **Voir dans l'arène**, **Continuer l'entraînement** (repart de ce modèle, avec son défi,
+   son scénario et sa reward, pour la durée choisie dans le formulaire) et **Charger sa
+   reward** (remet son code et son scénario dans la barre latérale).
+
+Clique sur une carte de **Tous les entraînements** pour la suivre dans le panneau. Dans
+l'Arène, un entraînement en cours apparaît aussi comme pilote « 📡 » (dernier instantané).
 
 Plusieurs entraînements peuvent tourner en parallèle, chacun sur environ un cœur CPU (jusqu'à
 nombre de cœurs − 2). Les résultats sont dans `runs/<nom>/` : `meta.json`, `reward.py`,
-`best_model.zip`, `last_model.zip`, `progress.json`, `eval.json` et `train.log`.
+`best_model.zip`, `last_model.zip`, `live_model.zip` et `live.json` (dernier instantané),
+`progress.json` (courbes), `episodes.json` (40 derniers essais avec leur trajectoire),
+`eval.json` et `train.log`.
 
 ## Ligne de commande
 

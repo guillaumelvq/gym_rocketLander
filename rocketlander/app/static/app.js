@@ -315,6 +315,11 @@ function applyChallenge(id, { announce = false } = {}) {
   refreshScenario();
   setChallengeCode();
   saveState();
+  renderObjective();
+  if (announce) {
+    showToast(`Défi chargé : ${ch.title} (scénario et reward mis à jour)`);
+    flash("#objective", "#train-objective", ".editor-wrap", "#preset-buttons");
+  }
 }
 
 // The editor keeps the user's reward code across reloads (localStorage). `codeOrigin` is the
@@ -327,11 +332,6 @@ function setChallengeCode(note) {
   const n = $("#code-note");
   n.hidden = !note; n.textContent = note || "";
   saveState();
-  renderObjective();
-  if (announce) {
-    showToast(`Défi chargé : ${ch.title} (scénario et reward mis à jour)`);
-    flash("#objective", "#train-objective", ".editor-wrap", "#preset-buttons");
-  }
 }
 
 function renderObjective() {
@@ -825,6 +825,7 @@ class Arena {
     if (m.type === "init") {
       this.renderer.setWorld(m.world); this.renderer.config = m.config; this.frameSkip = m.frame_skip;
       this.challenge = m.challenge;
+      $(".cret-label", this.node).textContent = m.agent === "model" || m.agent === "live" ? "sa reward d'entraînement" : "votre reward";
       if (m.snapshot) {
         this.liveBadge.textContent = `📡 instantané n°${m.snapshot.snapshot} · ${Math.round(m.snapshot.timesteps / 1000)}k pas`;
         this.liveBadge.hidden = false;
@@ -1175,7 +1176,7 @@ function runCard(r) {
   $(".progress > div", card).style.width = `${Math.min(100, 100 * (p.timesteps || 0) / (r.timesteps || 1))}%`;
   $(".run-stats", card).innerHTML = runStats(r);
   $(".stop", card).hidden = r.status !== "running" && r.status !== "starting";
-  $(".watch", card).disabled = !(r.has_best || r.has_last);
+  $(".watch", card).disabled = !(r.has_best || r.has_last || r.has_live);
   $(".load", card).hidden = !r.reward_code;
   return card;
 }
@@ -1261,6 +1262,7 @@ async function postTraining(body) {
 const lab = { run: store.get("labRun", null), arena: null, episodesT: null };
 // the live arena only plays while the laboratory is on screen (it costs CPU on the server)
 const labVisible = () => $("#tab-runs").classList.contains("active") && !document.hidden;
+window.rrl.lab = lab;
 
 const challengeTitle = (id) => (id && META.challenges[id] ? META.challenges[id].title : "Atterrir");
 const pct = (v) => (v == null ? "–" : `${Math.round(v * 100)}%`);
@@ -1361,12 +1363,19 @@ async function refreshLab() {
     a.note.textContent = "En attente du premier instantané de l'agent…";
   }
 
-  // learning curve + recent episodes
-  fetch(`/api/runs/${r.name}`).then((x) => x.json()).then((full) => drawChart($("#lab-chart"), full.progress?.history));
+  // learning curves + recent episodes
+  const kind = rewardKind(r);
+  $("#lab-reward-kind").textContent = `· ${kind}`;
+  $("#lab-returns-kind").textContent = `· ${kind}`;
+  fetch(`/api/runs/${r.name}`).then((x) => x.json()).then((full) => {
+    drawChart($("#lab-chart"), full.progress?.history);
+    drawRewardCurve($("#lab-reward"), full.progress?.history);
+  });
   if (r.status === "running" || lab.episodesT !== (p.timesteps || 0)) {
     lab.episodesT = p.timesteps || 0;
     const data = await (await fetch(`/api/runs/${r.name}/episodes`)).json();
     drawEpisodes($("#lab-traj"), data.episodes, r);
+    drawReturns($("#lab-returns"), data.episodes);
     renderVerdicts(data.episodes, r);
   }
 }
@@ -1430,13 +1439,91 @@ function drawEpisodes(canvas, episodes, r) {
   c.fillText(`${n} derniers essais · le plus récent en gras`, 8 * dpr, 16 * dpr);
 }
 
+// which reward the curves show: the code of the run (custom) or the environment's default one
+const rewardKind = (r) => (r.custom_reward ? "reward du défi (votre code)" : "reward de base");
+
+function chartFrame(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * dpr); canvas.height = Math.round(rect.height * dpr);
+  const cs = getComputedStyle(document.documentElement);
+  return { c: canvas.getContext("2d"), w: canvas.width, h: canvas.height, dpr, css: (n) => cs.getPropertyValue(n).trim() };
+}
+
+const niceNum = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1));
+
+// mean reward of the last 100 episodes along training, with a 10-90 % band
+function drawRewardCurve(canvas, history) {
+  const { c, w, h, dpr, css } = chartFrame(canvas);
+  const pad = { l: 38 * dpr, r: 8 * dpr, t: 8 * dpr, b: 16 * dpr };
+  c.clearRect(0, 0, w, h);
+  c.font = `${10 * dpr}px system-ui`; c.fillStyle = css("--muted");
+  const pts = (history || []).filter((p) => p.episode_return != null && Number.isFinite(p.episode_return));
+  if (!pts.length) { c.textAlign = "center"; c.fillText("en attente des premiers épisodes…", w / 2, h / 2); return; }
+  const lo0 = Math.min(...pts.map((p) => p.episode_return_p10 ?? p.episode_return), 0);
+  const hi0 = Math.max(...pts.map((p) => p.episode_return_p90 ?? p.episode_return), 0);
+  const span = Math.max(1e-6, hi0 - lo0), lo = lo0 - span * 0.05, hi = hi0 + span * 0.05;
+  const tMax = pts[pts.length - 1].t || 1;
+  const X = (t) => pad.l + (t / tMax) * (w - pad.l - pad.r);
+  const Y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (h - pad.t - pad.b);
+  // axes: zero line + min / max labels
+  c.strokeStyle = css("--line"); c.lineWidth = dpr;
+  c.beginPath(); c.moveTo(pad.l, Y(0)); c.lineTo(w - pad.r, Y(0)); c.stroke();
+  c.textAlign = "right";
+  c.fillText(niceNum(hi0), pad.l - 4 * dpr, Y(hi0) + 3 * dpr);
+  c.fillText(niceNum(lo0), pad.l - 4 * dpr, Y(lo0) + 3 * dpr);
+  if (Math.abs(Y(0) - Y(hi0)) > 12 * dpr && Math.abs(Y(0) - Y(lo0)) > 12 * dpr) c.fillText("0", pad.l - 4 * dpr, Y(0) + 3 * dpr);
+  c.textAlign = "center"; c.fillText(`${Math.round(tMax / 1000)}k pas`, w - 26 * dpr, h - 3 * dpr);
+  // band
+  if (pts.some((p) => p.episode_return_p10 != null)) {
+    c.fillStyle = css("--accent"); c.globalAlpha = 0.18; c.beginPath();
+    pts.forEach((p, i) => (i ? c.lineTo(X(p.t), Y(p.episode_return_p90 ?? p.episode_return)) : c.moveTo(X(p.t), Y(p.episode_return_p90 ?? p.episode_return))));
+    [...pts].reverse().forEach((p) => c.lineTo(X(p.t), Y(p.episode_return_p10 ?? p.episode_return)));
+    c.closePath(); c.fill(); c.globalAlpha = 1;
+  }
+  // mean
+  c.strokeStyle = css("--accent"); c.lineWidth = 2.5 * dpr; c.beginPath();
+  pts.forEach((p, i) => (i ? c.lineTo(X(p.t), Y(p.episode_return)) : c.moveTo(X(p.t), Y(p.episode_return))));
+  c.stroke();
+  const last = pts[pts.length - 1];
+  c.fillStyle = css("--accent"); c.beginPath(); c.arc(X(last.t), Y(last.episode_return), 3 * dpr, 0, Math.PI * 2); c.fill();
+  c.textAlign = "right"; c.fillStyle = css("--text"); c.font = `600 ${11 * dpr}px system-ui`;
+  c.fillText(`moyenne ${niceNum(last.episode_return)}`, w - pad.r, pad.t + 10 * dpr);
+}
+
+// reward of each recent attempt, as bars coloured like the trajectories (newest on the right)
+function drawReturns(canvas, episodes) {
+  const { c, w, h, dpr, css } = chartFrame(canvas);
+  c.clearRect(0, 0, w, h);
+  const eps = (episodes || []).filter((e) => e.return != null && Number.isFinite(e.return));
+  c.font = `${10 * dpr}px system-ui`; c.fillStyle = css("--muted");
+  if (!eps.length) { c.textAlign = "center"; c.fillText("pas encore d'essai terminé", w / 2, h / 2); return; }
+  const pad = { l: 38 * dpr, r: 4 * dpr, t: 4 * dpr, b: 4 * dpr };
+  const lo = Math.min(0, ...eps.map((e) => e.return)), hi = Math.max(0, ...eps.map((e) => e.return));
+  const span = Math.max(1e-6, hi - lo);
+  const Y = (v) => pad.t + (1 - (v - lo) / span) * (h - pad.t - pad.b);
+  const slot = (w - pad.l - pad.r) / eps.length, bw = Math.max(1, slot * 0.72);
+  eps.forEach((e, i) => {
+    const x = pad.l + i * slot + (slot - bw) / 2, y0 = Y(0), y1 = Y(e.return);
+    c.globalAlpha = i === eps.length - 1 ? 1 : 0.35 + 0.55 * (i / eps.length);
+    c.fillStyle = episodeColor(e, css);
+    c.fillRect(x, Math.min(y0, y1), bw, Math.max(1, Math.abs(y1 - y0)));
+  });
+  c.globalAlpha = 1;
+  c.strokeStyle = css("--line"); c.lineWidth = dpr;
+  c.beginPath(); c.moveTo(pad.l, Y(0)); c.lineTo(w - pad.r, Y(0)); c.stroke();
+  c.fillStyle = css("--muted"); c.textAlign = "right";
+  c.fillText(niceNum(hi), pad.l - 4 * dpr, Y(hi) + 8 * dpr);
+  c.fillText(niceNum(lo), pad.l - 4 * dpr, Y(lo));
+}
+
 function renderVerdicts(episodes, r) {
   const list = $("#lab-verdicts");
   const recent = (episodes || []).slice(-6).reverse();
   list.innerHTML = recent.map((e) => {
     const ok = e.challenge?.ok;
     const icon = ok === true ? "✅" : ok === false ? (e.outcome === "success" ? "🟦" : outcomeIcon(e.outcome)) : outcomeIcon(e.outcome);
-    return `<li><span>${icon}</span><b>${esc(e.challenge?.text || outcomeLabel(e.outcome))}</b><span>· ${Math.round(e.t / 1000)}k pas</span></li>`;
+    return `<li><span>${icon}</span><b>${esc(e.challenge?.text || outcomeLabel(e.outcome))}</b><span>· ${Math.round(e.t / 1000)}k pas</span><span class="ret">${e.return == null ? "" : `reward ${fmt(e.return, 1)}`}</span></li>`;
   }).join("") || `<li>Pas encore d'essai terminé.</li>`;
 }
 
@@ -1484,6 +1571,7 @@ function initTheme() {
     const next = cur === "light" ? "dark" : "light";
     document.documentElement.dataset.theme = next; store.set("theme", next);
     runCards.forEach((card, name) => drawChart($("canvas.chart", card), histories.get(name)?.h));
+    lab.episodesT = null; refreshLab();
   });
 }
 

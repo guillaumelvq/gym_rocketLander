@@ -49,7 +49,11 @@ class LandingStatsCallback(BaseCallback):
         judged = [o["challenge"] for o in recent if o["challenge"] is not None]
         if judged:
             out["challenge_rate"] = float(np.mean(judged))
-        out["episode_return"] = float(np.mean([o["return"] for o in recent]))
+        returns = [o["return"] for o in recent]
+        out["episode_return"] = float(np.mean(returns))
+        # spread of the episode rewards, drawn as a band around the mean in the web app
+        out["episode_return_p10"] = float(np.percentile(returns, 10))
+        out["episode_return_p90"] = float(np.percentile(returns, 90))
         ok = [o for o in recent if o["success"]]
         if ok:
             out["abs_x_when_landed"] = float(np.mean([o["abs_x"] for o in ok]))

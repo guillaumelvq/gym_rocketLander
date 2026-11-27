@@ -208,6 +208,8 @@
                 <span><i style="background:var(--bad)"></i>crash</span>
                 <span><i style="background:var(--warn)"></i>temps écoulé</span>
               </div>
+              <h3 class="sub returns-title">Reward de chaque essai <span id="lab-returns-kind" class="hint inline"></span></h3>
+              <canvas id="lab-returns"></canvas>
               <ul id="lab-verdicts" class="verdicts"></ul>
             </div>
             <div class="lab-col">
@@ -219,6 +221,9 @@
                 <span><i style="background:var(--bad)"></i>crashs</span>
                 <span><i style="background:var(--warn)"></i>temps écoulé</span>
               </div>
+              <h3 class="sub returns-title">Reward moyenne par essai <span id="lab-reward-kind" class="hint inline"></span></h3>
+              <canvas id="lab-reward" class="chart"></canvas>
+              <p class="hint reward-help">Moyenne des 100 derniers essais ; la bande va du 10ᵉ au 90ᵉ percentile.</p>
               <div id="lab-stats" class="run-stats"></div>
               <div class="run-actions">
                 <button id="lab-watch" class="small">Voir dans l'arène</button>
@@ -249,7 +254,7 @@
       </div>
       <div class="arena-foot">
         <span class="stat"><b class="ret">0.00</b><small>reward de base</small></span>
-        <span class="stat"><b class="cret">–</b><small>votre reward</small></span>
+        <span class="stat"><b class="cret">–</b><small class="cret-label">votre reward</small></span>
         <span class="stat"><b class="tally">0 / 0</b><small class="tally-label">défi réussi</small></span>
       </div>
       <p class="arena-note hint"></p>
