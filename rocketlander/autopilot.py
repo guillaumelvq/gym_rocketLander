@@ -14,8 +14,11 @@ class Autopilot:
     Works on the raw Box2D state, so it needs the underlying RocketLander (`env.unwrapped.lander`).
     """
 
-    def __init__(self, env, target_touchdown_speed: float = 2.0, margin: float = 1.3):
+    def __init__(self, env, target_touchdown_speed: float = 2.0, margin: float = 1.3,
+                 target_x_on_ship: float = 0.0):
+        """target_x_on_ship: where to land, 0 = ship centre, -1 / +1 = ship ends."""
         self.env = env
+        self.target_x_on_ship = target_x_on_ship
         self.v_td = target_touchdown_speed  # m/s at touchdown
         self.margin = margin  # >1 brakes earlier than the theoretical limit
 
@@ -45,7 +48,7 @@ class Autopilot:
         d_throttle = np.clip((throttle_cmd - e.throttle) * RL.FPS / 0.5, -1, 1)
 
         # attitude: tilt slightly against horizontal drift, gimbal + side thrusters keep it
-        x_err = (x - RL.W / 2)
+        x_err = x - (RL.W / 2 + self.target_x_on_ship * e.ship_width / 2)
         angle_target = np.clip(0.02 * x_err + 0.08 * vx, -0.15, 0.15)
         ang_err = body.angle - angle_target
         # positive gimbal pushes the engine so that the angle decreases
