@@ -14,7 +14,7 @@ from stable_baselines3.common.vec_env import VecNormalize
 
 from rocketlander.challenges import CodeReward
 from rocketlander.env import make_env
-from rocketlander.training import ALGOS, LandingStatsCallback, evaluate, make_vec
+from rocketlander.training import ALGOS, LandingStatsCallback, LiveSnapshotCallback, evaluate, make_vec
 
 
 def _probe_info() -> dict:
@@ -38,6 +38,11 @@ def main():
     p.add_argument("--no-reward-norm", action="store_true", help="disable VecNormalize on rewards")
     p.add_argument("--progress-bar", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--preset", default=None, help="name of the scenario preset (metadata only)")
+    p.add_argument("--challenge", default=None, help="challenge id used to judge episodes (challenges.py)")
+    p.add_argument("--init-model", default=None,
+                   help="start from this saved model (.zip) instead of a random policy (fine-tuning)")
+    p.add_argument("--snapshot-every", type=int, default=16_384,
+                   help="save live_model.zip every N steps so the app can show the agent learning")
     p.add_argument("--config", default="{}", help='JSON scenario overrides, e.g. {"start_height": 0.5}')
     p.add_argument("--reward-code", default=None,
                    help="Python file defining reward(s, base_reward) (see rocketlander/challenges.py)")
@@ -61,13 +66,15 @@ def main():
         "name": name, "algo": args.algo, "level": args.level, "continuous": continuous,
         "timesteps": int(args.timesteps), "reward": rp, "config": cfg, "seed": args.seed,
         "custom_reward": bool(args.reward_code), "preset": args.preset,
+        "challenge": args.challenge, "init_model": args.init_model,
         "gamma": args.gamma, "frame_skip": args.frame_skip, "reward_norm": not args.no_reward_norm,
         "created": datetime.now().isoformat(timespec="seconds"),
     }, indent=1), encoding="utf8")
     env = make_vec(args.level, continuous, n_envs=args.n_envs, seed=args.seed, reward_params=rp,
-                   frame_skip=args.frame_skip, config=cfg, reward_fn=reward_fn)
+                   frame_skip=args.frame_skip, config=cfg, reward_fn=reward_fn, challenge=args.challenge,
+                   keep_trajectory=True)
     eval_env = make_vec(args.level, continuous, n_envs=1, seed=args.seed + 1000, reward_params=rp,
-                        frame_skip=args.frame_skip, config=cfg, reward_fn=reward_fn)
+                        frame_skip=args.frame_skip, config=cfg, reward_fn=reward_fn, challenge=args.challenge)
 
     if not args.no_reward_norm:
         # Rewards span -5..+15 per episode end and ~0.01 per step: scaling them keeps the
@@ -86,14 +93,20 @@ def main():
                       policy_kwargs=dict(net_arch=[256, 256]))
     else:
         kwargs = dict(gamma=args.gamma)
-    model = ALGOS[args.algo]("MlpPolicy", env, seed=args.seed, verbose=0,
-                             tensorboard_log=str(Path("runs")), **kwargs)
+    if args.init_model:
+        # fine-tune an existing policy: same networks, new scenario / reward
+        model = ALGOS[args.algo].load(args.init_model, env=env, device="cpu", tensorboard_log=str(Path("runs")),
+                                      custom_objects={"learning_rate": kwargs.get("learning_rate", 3e-4)})
+    else:
+        model = ALGOS[args.algo]("MlpPolicy", env, seed=args.seed, verbose=0,
+                                 tensorboard_log=str(Path("runs")), **kwargs)
     model.learn(
         total_timesteps=int(args.timesteps),
         tb_log_name=name,
         progress_bar=args.progress_bar,
         callback=CallbackList([
             LandingStatsCallback(progress_path=out / "progress.json", total_timesteps=int(args.timesteps)),
+            LiveSnapshotCallback(out, every=args.snapshot_every),
             EvalCallback(eval_env, best_model_save_path=str(out), eval_freq=max(25_000 // args.n_envs, 1),
                          n_eval_episodes=20, deterministic=True, verbose=0),
         ]),
@@ -101,7 +114,7 @@ def main():
     model.save(out / "last_model")
     print("saved to", out)
     scores = evaluate(model, args.level, continuous, reward_params=rp, frame_skip=args.frame_skip, config=cfg,
-                      reward_fn=reward_fn)
+                      reward_fn=reward_fn, challenge=args.challenge)
     (out / "eval.json").write_text(json.dumps(scores, indent=1), encoding="utf8")
     print("eval (last model, 100 episodes):", scores)
 

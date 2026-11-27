@@ -28,8 +28,10 @@ class LandingStatsCallback(BaseCallback):
     the web app)."""
 
     def __init__(self, window: int = 100, progress_path: Optional[str] = None,
-                 total_timesteps: Optional[int] = None, every: int = 4096):
+                 total_timesteps: Optional[int] = None, every: int = 4096, keep_episodes: int = 40):
         super().__init__()
+        self.keep_episodes = keep_episodes
+        self.episodes: list[dict] = []  # last episodes with their trajectory (episodes.json)
         self.window = window
         self.progress_path = Path(progress_path) if progress_path else None
         self.total_timesteps = total_timesteps
@@ -44,6 +46,9 @@ class LandingStatsCallback(BaseCallback):
             return {}
         out = {f"{k}_rate": float(np.mean([o[k] for o in recent]))
                for k in ("success", "crash", "timeout", "touch_down")}
+        judged = [o["challenge"] for o in recent if o["challenge"] is not None]
+        if judged:
+            out["challenge_rate"] = float(np.mean(judged))
         out["episode_return"] = float(np.mean([o["return"] for o in recent]))
         ok = [o for o in recent if o["success"]]
         if ok:
@@ -55,9 +60,12 @@ class LandingStatsCallback(BaseCallback):
         for done, info in zip(self.locals["dones"], self.locals["infos"]):
             if not done:
                 continue
+            summary = info.get("summary") or {}
+            verdict = (info.get("challenge") or {}).get("ok")
             self.outcomes.append(
                 {
-                    "success": float(info.get("landed_full", False)),
+                    "challenge": None if verdict is None else float(verdict),
+                    "success": float(summary.get("landed", info.get("landed_full", False))),
                     "crash": float(info.get("game_over", False)),
                     "timeout": float(info.get("timeout", False) or info.get("TimeLimit.truncated", False)),
                     "touch_down": float(info.get("touch_down", False)),
@@ -66,6 +74,13 @@ class LandingStatsCallback(BaseCallback):
                     "return": info.get("episode", {}).get("r", np.nan),
                 }
             )
+            if summary.get("trajectory"):
+                self.episodes.append({
+                    "t": self.num_timesteps, "outcome": summary.get("outcome"),
+                    "challenge": info.get("challenge"), "return": info.get("episode", {}).get("r"),
+                    "trajectory": summary["trajectory"],
+                })
+                self.episodes = self.episodes[-self.keep_episodes :]
             for key, value in self._rates().items():
                 self.logger.record(f"landing/{key}", value)
         if self.progress_path and self.num_timesteps - self._last_write >= self.every:
@@ -84,9 +99,57 @@ class LandingStatsCallback(BaseCallback):
         data = {"status": status, "timesteps": self.num_timesteps,
                 "total_timesteps": self.total_timesteps, "episodes": len(self.outcomes),
                 "latest": rates, "history": self.history}
-        tmp = self.progress_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf8")
-        tmp.replace(self.progress_path)
+        _write_json(self.progress_path, data)
+        if self.episodes:
+            _write_json(self.progress_path.with_name("episodes.json"), self.episodes)
+
+
+class LiveSnapshotCallback(BaseCallback):
+    """Saves the current policy every `every` steps to live_model.zip, so the web app can
+    show the agent playing while it learns."""
+
+    def __init__(self, out_dir, every: int = 16_384):
+        super().__init__()
+        self.out_dir = Path(out_dir)
+        self.every = every
+        self._last = -10**9
+        self.count = 0
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last >= self.every:
+            self._save()
+        return True
+
+    def _on_training_end(self) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        self._last = self.num_timesteps
+        self.count += 1
+        tmp = self.out_dir / "live_model.tmp.zip"
+        self.model.save(tmp)
+        _replace(tmp, self.out_dir / "live_model.zip")
+        _write_json(self.out_dir / "live.json", {"timesteps": self.num_timesteps, "snapshot": self.count})
+
+
+def _write_json(path: Path, data) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf8")
+    _replace(tmp, path)
+
+
+def _replace(src: Path, dst: Path, attempts: int = 20) -> None:
+    """Atomic replace that survives Windows briefly locking the target (antivirus scan,
+    the web app reading it): retry, and give up silently on this snapshot if it stays locked."""
+    import time
+
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (i + 1))
+    src.unlink(missing_ok=True)
 
 
 def make_vec(
@@ -99,23 +162,27 @@ def make_vec(
     reward_params: Optional[dict] = None,
     frame_skip: int = 4,
     config: Optional[dict] = None,
+    challenge: Optional[str] = None,
+    keep_trajectory: bool = False,
 ):
     return make_vec_env(
         make_env,
         n_envs=n_envs,
         seed=seed,
         env_kwargs=dict(level=level, continuous=continuous, reward_fn=reward_fn,
-                        reward_params=reward_params, frame_skip=frame_skip, config=config),
+                        reward_params=reward_params, frame_skip=frame_skip, config=config,
+                        challenge=challenge, keep_trajectory=keep_trajectory),
         vec_env_cls=SubprocVecEnv if subprocess else None,
     )
 
 
 def evaluate(model, level=0, continuous=True, n_episodes=100, seed=10_000, reward_fn=None,
-             reward_params=None, frame_skip=4, config=None):
-    """Runs the deterministic policy and returns a dict of landing statistics."""
+             reward_params=None, frame_skip=4, config=None, challenge=None):
+    """Runs the deterministic policy and returns a dict of landing statistics (and the
+    challenge success rate when a challenge is given)."""
     env = make_env(level=level, continuous=continuous, reward_fn=reward_fn, reward_params=reward_params,
-                   frame_skip=frame_skip, config=config)
-    stats = {"success": 0, "crash": 0, "timeout": 0, "returns": [], "abs_x_landed": []}
+                   frame_skip=frame_skip, config=config, challenge=challenge)
+    stats = {"success": 0, "crash": 0, "timeout": 0, "returns": [], "abs_x_landed": [], "challenge": []}
     for ep in range(n_episodes):
         obs, info = env.reset(seed=seed + ep)
         done, ret = False, 0.0
@@ -125,7 +192,10 @@ def evaluate(model, level=0, continuous=True, n_episodes=100, seed=10_000, rewar
             ret += r
             done = term or trunc
         stats["returns"].append(ret)
-        if info["landed_full"]:
+        verdict = (info.get("challenge") or {}).get("ok")
+        if verdict is not None:
+            stats["challenge"].append(float(verdict))
+        if (info.get("summary") or {}).get("landed", info["landed_full"]):
             stats["success"] += 1
             stats["abs_x_landed"].append(abs(info["x"]))
         elif info["game_over"]:
@@ -140,6 +210,8 @@ def evaluate(model, level=0, continuous=True, n_episodes=100, seed=10_000, rewar
         "timeout_rate": stats["timeout"] / n,
         "mean_return": float(np.mean(stats["returns"])),
         "mean_abs_x_when_landed": float(np.mean(stats["abs_x_landed"])) if stats["abs_x_landed"] else None,
+        "challenge": challenge,
+        "challenge_rate": float(np.mean(stats["challenge"])) if stats["challenge"] else None,
     }
 
 

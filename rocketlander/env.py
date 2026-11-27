@@ -22,6 +22,7 @@ from gymnasium import spaces
 from gymnasium.wrappers import TimeLimit
 
 from gym.envs.box2d.rocket_lander import FPS, MAX_STEPS, RocketLander
+from rocketlander.episode import EpisodeTracker
 
 RewardFn = Callable[[dict, float], float]
 
@@ -43,6 +44,8 @@ class RocketLanderEnv(gymnasium.Env):
         reward_params: Optional[dict] = None,
         frame_skip: int = 4,
         config: Optional[dict] = None,
+        challenge: Optional[str] = None,
+        keep_trajectory: bool = False,
     ):
         """
         reward_params: overrides of the default reward weights (REWARD in rocket_lander.py).
@@ -52,6 +55,9 @@ class RocketLanderEnv(gymnasium.Env):
             and its action is repeated in between. Rewards of those frames are summed.
             Fewer decisions per episode = shorter credit-assignment horizon = much easier
             to learn.
+        challenge: id of a challenge (rocketlander.challenges) used to judge each episode:
+            the final info holds "summary" and "challenge" = {"ok", "text"}.
+        keep_trajectory: also keep a light trajectory in the summary (for visualisation).
         """
         assert render_mode in (None, *self.metadata["render_modes"])
         self.level = level
@@ -60,6 +66,8 @@ class RocketLanderEnv(gymnasium.Env):
         self.render_mode = render_mode
         self.frame_skip = frame_skip
         self.memory: dict = {}
+        self.challenge = challenge
+        self.tracker = EpisodeTracker(keep_trajectory=keep_trajectory)
         self.lander = RocketLander(level_number=level, continuous=continuous,
                                    reward_params=reward_params, config=config)
         self.observation_space = spaces.Box(
@@ -78,6 +86,7 @@ class RocketLanderEnv(gymnasium.Env):
             self.lander.seed(seed)
         obs = self.lander.reset()
         self.memory = {}  # free scratch space for custom reward functions, reset every episode
+        self.tracker.reset()
         if self.render_mode == "human":
             self.render()
         return obs, dict(self.lander.info)
@@ -87,6 +96,7 @@ class RocketLanderEnv(gymnasium.Env):
         for _ in range(self.frame_skip):
             obs, base, terminated, info = self.lander.step(action)
             base_total += base
+            self.tracker.update(info)
             if self.reward_fn is not None:
                 info = dict(info, memory=self.memory)
                 total += float(self.reward_fn(info, base))
@@ -98,6 +108,11 @@ class RocketLanderEnv(gymnasium.Env):
                 break
         info = dict(info, base_reward=base_total)
         info.pop("memory", None)
+        if terminated:
+            from rocketlander.challenges import judge
+
+            info["summary"] = summary = self.tracker.summary()
+            info["challenge"] = judge(self.challenge, summary)
         return obs, total, terminated, False, info
 
     def render(self):
@@ -118,11 +133,14 @@ def make_env(
     reward_params: Optional[dict] = None,
     frame_skip: int = 4,
     config: Optional[dict] = None,
+    challenge: Optional[str] = None,
+    keep_trajectory: bool = False,
 ) -> gymnasium.Env:
     """Create a RocketLander env. Episodes last at most MAX_STEPS physics frames (the
     env ends them itself, as a failure); `max_episode_steps` (in agent decisions) is an
     extra safety limit."""
-    env = RocketLanderEnv(level, continuous, reward_fn, render_mode, reward_params, frame_skip, config)
+    env = RocketLanderEnv(level, continuous, reward_fn, render_mode, reward_params, frame_skip, config,
+                          challenge, keep_trajectory)
     if max_episode_steps is None:
         max_episode_steps = env.lander.config["max_steps"] // frame_skip + 10
     return TimeLimit(env, max_episode_steps=max_episode_steps)

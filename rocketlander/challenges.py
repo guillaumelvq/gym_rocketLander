@@ -65,7 +65,7 @@ CHALLENGES: dict[str, dict] = {
     },
     "salto": {
         "title": "Faire un salto",
-        "goal": "Faire un tour complet sur soi-même, puis atterrir.",
+        "goal": "Faire UN tour complet sur soi-même (pas plus), puis atterrir.",
         "level": 0,
         "config": {"start_height": 0.7, "start_speed": 5.0, "start_spin": 0.0},
         "code": '''def reward(s, base_reward):
@@ -73,14 +73,21 @@ CHALLENGES: dict[str, dict] = {
     turns = abs(s["rotation"])            # tours effectués depuis le départ
     best = m.get("best_turns", 0.0)
     r = 0.0
-    if turns > best:                      # récompense chaque progrès dans la rotation
-        r += 10 * (turns - best)
+    # 1) les progrès de rotation rapportent... mais seulement jusqu'à 1 tour.
+    #    Piège : sans les min(), chaque tour en plus rapporte encore
+    #    et l'agent apprend à tourner sans s'arrêter.
+    if turns > best:
+        r += 10 * (min(turns, 1.0) - min(best, 1.0))
         m["best_turns"] = turns
     if turns >= 1 and not m.get("flip_done"):
         m["flip_done"] = True
         r += 10                           # salto réussi
+    # 2) tourner au-delà d'un tour et quart coûte, à chaque instant
+    if turns > 1.25:
+        r -= 0.05
+    # 3) une fois le salto fait : se redresser et atterrir (reward de base)
     if m.get("flip_done"):
-        r += base_reward                  # ensuite : atterrir
+        r += base_reward
     elif s["game_over"]:
         r -= 5
     return r
@@ -175,3 +182,74 @@ class CodeReward:
     def __setstate__(self, state):
         self.code = state["code"]
         self._fn = None
+
+
+# --------------------------------------------------------------------------- judging
+# Each check reads the episode summary (rocketlander.episode.EpisodeTracker.summary) and
+# returns (ok, text). ok is None when there is no right answer (demo challenges).
+
+def _landing(s):
+    return s["landed"], "posé" if s["landed"] else _fail(s)
+
+
+def _center(s):
+    x = abs(s["x_on_ship"])
+    return s["landed"] and x < 0.2, f"écart au centre {x:.2f}" if s["landed"] else _fail(s)
+
+
+def _edge(s):
+    x = s["x_on_ship"]
+    ok = s["landed"] and 0.65 <= x <= 1.0
+    return ok, f"posé à {x:+.2f} (bord droit = +1)" if s["landed"] else _fail(s)
+
+
+def _salto(s):
+    turns = s["max_rotation"]
+    ok = 1.0 <= turns < 1.5 and s["landed"]
+    end = "puis posé" if s["landed"] else _fail(s)
+    return ok, f"{turns:.2f} tour, {end}"
+
+
+def _one_foot(s):
+    gap = s["contact_gap_s"]
+    if not s["landed"]:
+        return False, _fail(s)
+    ok = gap is not None and gap >= 0.5
+    return ok, f"{gap or 0:.2f} s entre les deux pieds"
+
+
+def _hover(s):
+    return s["hover_s"] >= 5.0, f"{s['hover_s']:.1f} s en vol stationnaire à 100 m"
+
+
+def _fuel(s):
+    ok = s["landed"] and s["fuel"] >= 0.5
+    return ok, f"carburant restant {s['fuel']:.0%}" if s["landed"] else _fail(s)
+
+
+def _hacking(s):
+    return None, f"{s['contact_s']:.1f} s avec un pied sur le bateau, posé : {'oui' if s['landed'] else 'non'}"
+
+
+def _fail(s):
+    return {"crash": "crash", "broken_leg": "pied cassé", "outside": "sorti de l'écran",
+            "timeout": "temps écoulé"}.get(s["outcome"], s["outcome"])
+
+
+CHECKS = {
+    "landing": _landing, "center": _center, "edge": _edge, "salto": _salto,
+    "one_foot": _one_foot, "hover": _hover, "fuel": _fuel, "hacking": _hacking,
+}
+for _id, _ch in CHALLENGES.items():
+    _ch.setdefault("success", {
+        "landing": "posé 1 s", "center": "posé à moins de 0,2 du centre", "edge": "posé entre +0,65 et +1",
+        "salto": "1 tour (entre 1 et 1,5) puis posé", "one_foot": "≥ 0,5 s entre les deux pieds",
+        "hover": "≥ 5 s à 100 m ± 15 m", "fuel": "posé avec ≥ 50 % de carburant",
+        "hacking": "pas de bonne réponse : observer",
+    }[_id])
+
+
+def judge(challenge: Optional[str], summary: dict) -> dict:
+    """{'ok': bool | None, 'text': str} for a challenge id, or the plain landing check."""
+    ok, text = CHECKS.get(challenge or "landing", _landing)(summary)
+    return {"ok": ok, "text": text}
