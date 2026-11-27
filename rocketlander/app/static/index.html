@@ -15,7 +15,7 @@
     </div>
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="arena" role="tab">Arène</button>
-      <button class="tab" data-tab="runs" role="tab">Entraînements <span id="runs-badge" class="badge" hidden></span></button>
+      <button class="tab" data-tab="runs" role="tab">Laboratoire <span id="runs-badge" class="badge" hidden></span></button>
     </nav>
     <div class="top-actions">
       <button id="theme-toggle" class="ghost icon" title="Thème clair / sombre" aria-label="Thème">◐</button>
@@ -119,6 +119,7 @@
           </label>
           <p id="keys-help" class="hint keys-help"></p>
         </div>
+        <div id="objective" class="objective"></div>
         <div id="arenas" class="arenas"></div>
 
         <div class="board-wrap">
@@ -155,8 +156,11 @@
         <div class="train-form panel">
           <div class="panel-head"><h2>Nouvel entraînement</h2>
             <span class="hint inline">utilise le défi, le scénario et la reward de gauche</span></div>
+          <div id="train-objective" class="objective compact"></div>
           <div class="form-grid">
             <label class="field"><span>Nom</span><input id="run-name" type="text" placeholder="mon-agent"></label>
+            <label class="field wide"><span>Point de départ</span>
+              <select id="init-run"></select></label>
             <label class="field"><span>Algorithme</span>
               <select id="algo"><option>PPO</option><option>A2C</option></select></label>
             <label class="field"><span>Actions</span>
@@ -173,8 +177,57 @@
               <select id="gamma"><option>0.99</option><option>0.995</option><option selected>0.999</option></select></label>
             <button id="train" class="primary">Lancer l'entraînement</button>
           </div>
+          <p id="init-hint" class="hint" hidden>Algorithme et type d'actions repris de l'agent de départ : il garde ce qu'il sait faire et s'adapte au nouveau défi.</p>
           <p id="train-msg" class="msg" hidden></p>
         </div>
+
+        <section id="lab" class="panel lab" hidden>
+          <div class="panel-head lab-head">
+            <h2>Entraînement suivi · <span id="lab-title"></span></h2>
+            <span id="lab-status" class="pill"></span>
+            <span id="lab-time" class="hint inline"></span>
+            <span class="spacer"></span>
+            <button id="lab-stop" class="small ghost">■ Arrêter</button>
+          </div>
+          <p id="lab-meta" class="run-meta"></p>
+          <div class="progress lab-progress"><div></div></div>
+          <div class="lab-grid">
+            <div class="lab-col">
+              <h3 class="sub">L'agent en direct</h3>
+              <div id="lab-arena"></div>
+              <p class="hint">Chaque épisode est joué par le dernier instantané de l'agent : on le voit apprendre.</p>
+            </div>
+            <div class="lab-col">
+              <h3 class="sub">Essais récents de l'entraînement</h3>
+              <canvas id="lab-traj"></canvas>
+              <div class="legend">
+                <span><i style="background:var(--ok)"></i>défi réussi</span>
+                <span><i style="background:var(--info)"></i>posé, défi raté</span>
+                <span><i style="background:var(--bad)"></i>crash</span>
+                <span><i style="background:var(--warn)"></i>temps écoulé</span>
+              </div>
+              <ul id="lab-verdicts" class="verdicts"></ul>
+            </div>
+            <div class="lab-col">
+              <h3 class="sub">Progression</h3>
+              <canvas id="lab-chart" class="chart"></canvas>
+              <div class="legend">
+                <span><i style="background:var(--accent)"></i>défi réussi</span>
+                <span><i style="background:var(--ok)"></i>atterrissages</span>
+                <span><i style="background:var(--bad)"></i>crashs</span>
+                <span><i style="background:var(--warn)"></i>temps écoulé</span>
+              </div>
+              <div id="lab-stats" class="run-stats"></div>
+              <div class="run-actions">
+                <button id="lab-watch" class="small">Voir dans l'arène</button>
+                <button id="lab-continue" class="small ghost">Continuer l'entraînement</button>
+                <button id="lab-load" class="small ghost">Charger sa reward</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <h3 class="sub runs-title">Tous les entraînements <span class="hint inline">clique sur une carte pour la suivre</span></h3>
         <div id="runs" class="runs"></div>
       </section>
     </main>
@@ -188,18 +241,20 @@
       </div>
       <div class="screen">
         <canvas></canvas>
+        <div class="live-badge" hidden></div>
         <div class="banner" hidden></div>
         <div class="countdown" hidden></div>
       </div>
       <div class="arena-foot">
         <span class="stat"><b class="ret">0.00</b><small>reward de base</small></span>
         <span class="stat"><b class="cret">–</b><small>votre reward</small></span>
-        <span class="stat"><b class="tally">0 / 0</b><small>réussites</small></span>
+        <span class="stat"><b class="tally">0 / 0</b><small class="tally-label">défi réussi</small></span>
       </div>
       <p class="arena-note hint"></p>
     </article>
   </template>
 
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/static/app.js" type="module"></script>
 </body>
 </html>
