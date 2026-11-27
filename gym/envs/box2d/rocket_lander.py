@@ -100,6 +100,7 @@ DEFAULT_CONFIG = {
     "max_steps": 1500,             # physics frames (60 = 1 s = 25 s); then the episode fails
     "fuel": FUEL_CAPACITY,
     "control": "direct",           # continuous actions: "direct" setpoints or "rate" of change
+    "containers": True,            # the two yellow blocks at the ends of the ship (hull hitting one = crash)
 }
 
 
@@ -176,21 +177,25 @@ class ContactDetector(contactListener):
         self.env = env
 
     def BeginContact(self, contact):
-        if (
-            self.env.water in [contact.fixtureA.body, contact.fixtureB.body]
-            or self.env.lander in [contact.fixtureA.body, contact.fixtureB.body]
-            or self.env.containers[0] in [contact.fixtureA.body, contact.fixtureB.body]
-            or self.env.containers[1] in [contact.fixtureA.body, contact.fixtureB.body]
-        ):
+        bodies = (contact.fixtureA.body, contact.fixtureB.body)
+        if self.env.water in bodies or self.env.lander in bodies:
+            # touching the sea, or the rocket hull touching anything (deck, containers)
             self.env.game_over = True
+        elif any(c in bodies for c in self.env.containers):
+            # a leg bumping into a container is just an obstacle, not a crash
+            # (the original code crashed here, which made landing near the edge impossible)
+            pass
         else:
             for i in range(2):
-                if self.env.legs[i] in [contact.fixtureA.body, contact.fixtureB.body]:
+                if self.env.legs[i] in bodies:
                     self.env.legs[i].ground_contact = True
 
     def EndContact(self, contact):
+        bodies = (contact.fixtureA.body, contact.fixtureB.body)
+        if any(c in bodies for c in self.env.containers):
+            return
         for i in range(2):
-            if self.env.legs[i] in [contact.fixtureA.body, contact.fixtureB.body]:
+            if self.env.legs[i] in bodies:
                 self.env.legs[i].ground_contact = False
 
 
@@ -259,8 +264,8 @@ class RocketLander(gym.Env):
         self.world.DestroyBody(self.legs[0])
         self.world.DestroyBody(self.legs[1])
         self.legs = []
-        self.world.DestroyBody(self.containers[0])
-        self.world.DestroyBody(self.containers[1])
+        for container in self.containers:
+            self.world.DestroyBody(container)
         self.containers = []
 
     def reset(self):
@@ -323,7 +328,7 @@ class RocketLander(gym.Env):
         )
 
         self.containers = []
-        for side in [-1, 1]:
+        for side in ([-1, 1] if cfg["containers"] else []):
             self.containers.append(
                 self.world.CreateStaticBody(
                     fixtures=fixtureDef(

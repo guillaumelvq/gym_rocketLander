@@ -313,8 +313,19 @@ function applyChallenge(id, { announce = false } = {}) {
   applyLevel(ch.level, ch.config);
   state.base = { kind: "challenge", id };
   refreshScenario();
-  state.code = ch.code;
+  setChallengeCode();
+  saveState();
+}
+
+// The editor keeps the user's reward code across reloads (localStorage). `codeOrigin` is the
+// challenge code it started from: while the user has not edited it, a newer version of the
+// challenge (server side) replaces it automatically.
+function setChallengeCode(note) {
+  const ch = META.challenges[state.challenge];
+  state.code = state.codeOrigin = ch.code;
   $("#reward-code").value = ch.code;
+  const n = $("#code-note");
+  n.hidden = !note; n.textContent = note || "";
   saveState();
   renderObjective();
   if (announce) {
@@ -375,6 +386,11 @@ function initSidebar() {
 
   const code = $("#reward-code");
   code.addEventListener("input", () => { state.code = code.value; saveState(); });
+  $("#reload-code").addEventListener("click", () => {
+    if (state.code !== state.codeOrigin && state.code !== META.challenges[state.challenge].code
+        && !confirm("Remplacer ton code par celui du défi ?")) return;
+    setChallengeCode();
+  });
   code.addEventListener("keydown", (e) => {
     if (e.key !== "Tab") return;
     e.preventDefault();
@@ -391,6 +407,13 @@ function initSidebar() {
     chSel.value = state.challenge;
     $("#challenge-goal").textContent = META.challenges[state.challenge].goal;
     code.value = state.code;
+    const latest = META.challenges[state.challenge].code;
+    const unedited = saved.codeOrigin === undefined || saved.code === saved.codeOrigin;
+    if (state.code !== latest) {
+      if (unedited) setChallengeCode("Code du défi mis à jour avec la dernière version.");
+      else { const n = $("#code-note"); n.hidden = false;
+             n.textContent = "Tu as modifié ce code. Le défi a une version plus récente : « ↺ Code du défi » pour la reprendre."; }
+    }
     buildConfigFields();
     refreshScenario();
   } else {
